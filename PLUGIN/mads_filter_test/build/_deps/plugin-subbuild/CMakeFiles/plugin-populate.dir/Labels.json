@@ -1,0 +1,46 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "/Users/alberto/MECHATRONIC_ENGINEERING/ROBOTIC_PERCEPTION/PROJECT/PLUGIN/mads_filter_test/build/_deps/plugin-subbuild/CMakeFiles/plugin-populate"
+		},
+		{
+			"file" : "/Users/alberto/MECHATRONIC_ENGINEERING/ROBOTIC_PERCEPTION/PROJECT/PLUGIN/mads_filter_test/build/_deps/plugin-subbuild/CMakeFiles/plugin-populate.rule"
+		},
+		{
+			"file" : "/Users/alberto/MECHATRONIC_ENGINEERING/ROBOTIC_PERCEPTION/PROJECT/PLUGIN/mads_filter_test/build/_deps/plugin-subbuild/CMakeFiles/plugin-populate-complete.rule"
+		},
+		{
+			"file" : "/Users/alberto/MECHATRONIC_ENGINEERING/ROBOTIC_PERCEPTION/PROJECT/PLUGIN/mads_filter_test/build/_deps/plugin-subbuild/plugin-populate-prefix/src/plugin-populate-stamp/plugin-populate-build.rule"
+		},
+		{
+			"file" : "/Users/alberto/MECHATRONIC_ENGINEERING/ROBOTIC_PERCEPTION/PROJECT/PLUGIN/mads_filter_test/build/_deps/plugin-subbuild/plugin-populate-prefix/src/plugin-populate-stamp/plugin-populate-configure.rule"
+		},
+		{
+			"file" : "/Users/alberto/MECHATRONIC_ENGINEERING/ROBOTIC_PERCEPTION/PROJECT/PLUGIN/mads_filter_test/build/_deps/plugin-subbuild/plugin-populate-prefix/src/plugin-populate-stamp/plugin-populate-download.rule"
+		},
+		{
+			"file" : "/Users/alberto/MECHATRONIC_ENGINEERING/ROBOTIC_PERCEPTION/PROJECT/PLUGIN/mads_filter_test/build/_deps/plugin-subbuild/plugin-populate-prefix/src/plugin-populate-stamp/plugin-populate-install.rule"
+		},
+		{
+			"file" : "/Users/alberto/MECHATRONIC_ENGINEERING/ROBOTIC_PERCEPTION/PROJECT/PLUGIN/mads_filter_test/build/_deps/plugin-subbuild/plugin-populate-prefix/src/plugin-populate-stamp/plugin-populate-mkdir.rule"
+		},
+		{
+			"file" : "/Users/alberto/MECHATRONIC_ENGINEERING/ROBOTIC_PERCEPTION/PROJECT/PLUGIN/mads_filter_test/build/_deps/plugin-subbuild/plugin-populate-prefix/src/plugin-populate-stamp/plugin-populate-patch.rule"
+		},
+		{
+			"file" : "/Users/alberto/MECHATRONIC_ENGINEERING/ROBOTIC_PERCEPTION/PROJECT/PLUGIN/mads_filter_test/build/_deps/plugin-subbuild/plugin-populate-prefix/src/plugin-populate-stamp/plugin-populate-test.rule"
+		},
+		{
+			"file" : "/Users/alberto/MECHATRONIC_ENGINEERING/ROBOTIC_PERCEPTION/PROJECT/PLUGIN/mads_filter_test/build/_deps/plugin-subbuild/plugin-populate-prefix/src/plugin-populate-stamp/plugin-populate-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"plugin-populate"
+		],
+		"name" : "plugin-populate"
+	}
+}

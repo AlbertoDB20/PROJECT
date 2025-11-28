@@ -1,0 +1,10 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/alberto/MECHATRONIC_ENGINEERING/ROBOTIC_PERCEPTION/PROJECT/PLUGIN/mads_filter_test/build/cmake_install.cmake",
+		"/Users/alberto/MECHATRONIC_ENGINEERING/ROBOTIC_PERCEPTION/PROJECT/PLUGIN/mads_filter_test/build/_deps/pugg-build/cmake_install.cmake",
+		"/Users/alberto/MECHATRONIC_ENGINEERING/ROBOTIC_PERCEPTION/PROJECT/PLUGIN/mads_filter_test/build/_deps/pugg-build/src/pugg/cmake_install.cmake",
+		"/Users/alberto/MECHATRONIC_ENGINEERING/ROBOTIC_PERCEPTION/PROJECT/PLUGIN/mads_filter_test/build/_deps/json-build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
