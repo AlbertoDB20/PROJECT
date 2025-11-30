@@ -24,9 +24,76 @@
 #define PLUGIN_NAME "pose_estimation"
 #endif
 
+#define PRINT_INPUT 0
+#define PRINT_OUTPUT 1
+
 // Load the namespaces
 using namespace std;
 using json = nlohmann::json;
+
+// TODO: Put this in mads.ini
+// Kinematic parameters   
+static constexpr double R_L = 0.0876;   // raggio ruota sinistra [m]
+static constexpr double R_R = 0.0886;   // raggio ruota destra [m]
+static constexpr double n0 = 4096;      // tics per giro
+static constexpr double b = 0.8313;     // distanza tra ruote [m]
+
+
+// Static variables to keep track of last encoder values and time
+static bool first = false;
+static bool second = false;
+static int last_enc_L = 0;
+static int last_enc_R = 0;
+static double last_time = 0.0;
+
+// Define a class to store data from encoder
+class EncoderData {
+public:
+  int left_encoder;
+  int right_encoder;
+  double timecode;
+  EncoderData() : left_encoder(0), right_encoder(0), timecode(0.0) {}
+};
+
+// Define a class to store data from htc
+class HTCData {
+public:
+  float x;
+  float y;
+  float z;
+  double timecode;
+  HTCData() : x(0.0), y(0.0), z(0.0), timecode(0.0) {}
+};
+
+// Define a class to store realsense data
+class RealsenseData{
+public:
+  float x;
+  float y;
+  float z;
+  double timecode;
+  RealsenseData() : x(0.0), y(0.0), z(0.0), timecode(0.0) {}
+};
+
+class IMUData{
+public:
+  float x;
+  float y;
+  float z;
+  double timecode;
+  IMUData() : x(0.0), y(0.0), z(0.0), timecode(0.0) {}
+};
+
+// Define a class to store pose data
+class PoseData {
+public:
+  double x;
+  double y;
+  double z;
+  double theta;
+  double timecode;
+  PoseData() : x(0.0), y(0.0), z(0.0), theta(0.0), timecode(0.0) {}
+};
 
 
 // Plugin class. This shall be the only part that needs to be modified,
@@ -40,6 +107,96 @@ public:
 
   // Implement the actual functionality here
   return_type load_data(json const &input, string topic = "") override {
+
+    // Store data from encoders
+    if (input.contains("message") && input["message"].contains("encoders")) {
+      auto &E = input["message"]["encoders"];
+      if (E.contains("left") && E["left"].is_number()) {
+        encoder_data.left_encoder = E["left"].get<int>();
+        if(!second){
+          first = true;
+        }
+      }
+      if (E.contains("right") && E["right"].is_number()) {
+        encoder_data.right_encoder = E["right"].get<int>();
+      }
+    }
+
+    // Store data from HTC (position is a vector with x,y,z)
+    if (input.contains("message") && input["message"].contains("pose") && input["message"]["pose"].contains("position")) {
+      auto &P = input["message"]["pose"]["position"];
+      if (P.is_array() && P.size() >= 3) {
+        if (P[0].is_number()) {
+          htc_data.x = P[0].get<float>();
+        }
+        if (P[1].is_number()) {
+          htc_data.y = P[1].get<float>();
+        }
+        if (P[2].is_number()) {
+          htc_data.z = P[2].get<float>();
+        } 
+      }
+    }
+
+    // Store data from HTC (position is a vector with x,y,z)
+    if (input.contains("message") && input["message"].contains("pose") && input["message"]["pose"].contains("position_rs")) {
+      auto &P = input["message"]["pose"]["position_rs"];
+      if (P.is_array() && P.size() >= 3) {
+        if (P[0].is_number()) {
+          realsense_data.x = P[0].get<float>();
+        }
+        if (P[1].is_number()) {
+          realsense_data.y = P[1].get<float>();
+        }
+        if (P[2].is_number()) {
+          realsense_data.z = P[2].get<float>();
+        } 
+      }
+    }
+
+    // Store data from IMU
+    if (input.contains("message") && input["message"].contains("fusionPose")) {
+      auto &E = input["message"]["fusionPose"];
+      if (E.is_array() && E.size() >= 3) {
+        if (E[0].is_number()) {
+          imu_data.x = E[0].get<float>();
+        }
+        if (E[1].is_number()) {
+          imu_data.y = E[1].get<float>();
+        }
+        if (E[2].is_number()) {
+          imu_data.z = E[2].get<float>();
+        } 
+      }
+    }
+    
+    // Store timecode (equal for both sensors)
+    if (input.contains("timecode") && input["timecode"].is_number()) {
+      encoder_data.timecode = input["timecode"].get<double>();
+      htc_data.timecode = input["timecode"].get<double>();
+      realsense_data.timecode = input["timecode"].get<double>();
+      imu_data.timecode = input["timecode"].get<double>();
+    }
+
+    if(PRINT_INPUT){
+       // Print the input data for debugging purposes
+      cout << "\n\n___________ Input data: ____________\n\n" << input.dump(2) << endl;
+
+      // Debug: print stored data
+      cout << "\n\n___________ Stored data: ____________\n\n";
+      cout << "Encoders: Left = " << encoder_data.left_encoder
+            << ", Right = " << encoder_data.right_encoder << endl;
+      cout << "HTC Position: x = " << htc_data.x
+            << ", y = " << htc_data.y
+            << ", z = " << htc_data.z << endl;
+      cout << "Realsense Position: x = " << realsense_data.x
+            << ", y = " << realsense_data.y
+            << ", z = " << realsense_data.z << endl;
+      cout << "IMU Position: x = " << imu_data.x
+            << ", y = " << imu_data.y
+            << ", z = " << imu_data.z << endl;
+      cout << "Timecode: " << encoder_data.timecode << endl;  
+    }
     // Do something with the input data
     return return_type::success;
   }
@@ -47,13 +204,90 @@ public:
   // We calculate the average of the last N values for each key and store it
   // into the output json object
   return_type process(json &out) override {
+  
+    if (first) {
+      // pose_data_enc.x = -12.86;  // initial x position [m]
+      last_enc_L = encoder_data.left_encoder;
+      last_enc_R = encoder_data.right_encoder;
+      last_time = encoder_data.timecode;
+      second = true;
+      first = false;
+      cout << "First run initialization done." << endl;
+    }
+
+    // Compute variation of the encoder ticks: Δtic
+    int n_Lk = encoder_data.left_encoder - last_enc_L;
+    int n_Rk = encoder_data.right_encoder - last_enc_R;
+
+    // Update last encoder values
+    last_enc_L = encoder_data.left_encoder;
+    last_enc_R = encoder_data.right_encoder;
+
+    // Compute time difference
+    double dt = encoder_data.timecode - last_time;
+    if (!std::isfinite(dt) || dt <= 0) dt = 0;
+
+    // Kinematic model (as in MATLAB)
+    double dx = M_PI * (n_Rk * R_R + n_Lk * R_L) / n0 * std::cos(pose_data_enc.theta);
+    double dy = M_PI * (n_Rk * R_R + n_Lk * R_L) / n0 * std::sin(pose_data_enc.theta);
+    double dtheta = 2 * M_PI * (n_Rk * R_R - n_Lk * R_L) / (n0 * b);
+
+    // ________ UPDATE POSE ________ 
+
+    // Update pose from encoder
+    pose_data_enc.x += dx;
+    pose_data_enc.y += dy;
+    pose_data_enc.z = 0.0;          // assuming z=0 for encoders
+    pose_data_enc.theta += dtheta;
+    pose_data_enc.timecode = encoder_data.timecode;
+
+    // Pose data from htc
+    pose_data_htc.x = htc_data.x;
+    pose_data_htc.y = htc_data.y;
+    pose_data_htc.z = 0.0;          // assuming z=0 for HTC
+    pose_data_htc.timecode = htc_data.timecode;
+
+    // Pose data from realsense
+    pose_data_realsense.x = realsense_data.x;
+    pose_data_realsense.y = realsense_data.y;
+    pose_data_realsense.z = 0.0;    // assuming z=0 for realsense
+    pose_data_realsense.timecode = realsense_data.timecode;
+
+    // Pose data from imu
+    pose_data_imu.x = imu_data.x;
+    pose_data_imu.y = imu_data.y;
+    pose_data_imu.z = 0.0;          // assuming z=0 for imu
+    pose_data_imu.timecode = imu_data.timecode;
+
+
+    // ________ CONSTRUCT OUTPUT __________ 
     out.clear();
+    // output from input data 
+    out["encoders"] = {
+      {"left", encoder_data.left_encoder},
+      {"right", encoder_data.right_encoder}
+    };
+    out["htc"] = {htc_data.x, htc_data.y, htc_data.z};
+    out["realsense"] = {realsense_data.x, realsense_data.y, realsense_data.z};
+    out["imu"] = {imu_data.x, imu_data.y, imu_data.z};
+    // output from data elaboration
+    out["position_enc"] = {pose_data_enc.x, pose_data_enc.y, pose_data_enc.z};
+    out["position_htc"] = {pose_data_htc.x, pose_data_htc.y, pose_data_htc.z};
+    out["position_realsense"] = {pose_data_realsense.x, pose_data_realsense.y, pose_data_realsense.z};
+    out["position_imu"] = {pose_data_imu.x, pose_data_imu.y, pose_data_imu.z};
 
-    // load the data as necessary and set the fields of the json out variable
 
-    // This sets the agent_id field in the output json object, only when it is
-    // not empty
-    if (!_agent_id.empty()) out["agent_id"] = _agent_id;
+    // _______ PRINT FOR DEBUG ___________
+    if (PRINT_OUTPUT){
+      cout << "\n\n___________ Output data: ____________\n\n" << out.dump(2) << endl;
+      cout << "\n\n___________ Computed Pose Data: ____________\n\n";
+      cout << "Encoder-based Pose: x = " << pose_data_enc.x << ", y = " << pose_data_enc.y << ", z = " << pose_data_enc.z << ", theta = " << pose_data_enc.theta << ", timecode = " << pose_data_enc.timecode << endl;
+      cout << "HTC Pose: x = " << pose_data_htc.x << ", y = " << pose_data_htc.y << ", z = " << pose_data_htc.z << ", theta = " << pose_data_htc.theta << ", timecode = " << pose_data_htc.timecode << endl;
+      cout << "Realsense Pose: x = " << pose_data_realsense.x << ", y = " << pose_data_realsense.y << ", z = " << pose_data_realsense.z << ", theta = " << pose_data_realsense.theta << ", timecode = " << pose_data_realsense.timecode << endl;
+      cout << "IMU Pose: x = " << pose_data_imu.x << ", y = " << pose_data_imu.y << ", z = " << pose_data_imu.z << ", theta = " << pose_data_imu.theta << ", timecode = " << pose_data_imu.timecode << endl;
+      cout << "Time difference dt = " << dt << " seconds" << endl;
+      cout << "dx = " << dx << ", dy = " << dy << ", dtheta = " << dtheta << endl;
+    }
     return return_type::success;
   }
   
@@ -83,8 +317,17 @@ public:
   };
 
 private:
-  // Define the fields that are used to store internal resources
-  
+  // Data in input from sensors
+  EncoderData encoder_data;
+  HTCData htc_data;
+  RealsenseData realsense_data;
+  IMUData imu_data;
+
+  // Position computed by filter
+  PoseData pose_data_enc;
+  PoseData pose_data_htc;
+  PoseData pose_data_realsense;
+  PoseData pose_data_imu;
 };
 
 
