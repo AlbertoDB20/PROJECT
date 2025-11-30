@@ -32,7 +32,7 @@ The following script:
 - runs the *sink*, *filter*, and *source* in the correct order  
 - replays data such as "encoders" and "htc" through the replay plugin  
 
-### `run.sh`
+### pseudocode of `run.sh` for test filter
 ```bash
 #!/bin/bash
 
@@ -41,7 +41,7 @@ echo "Starting mads broker..."
 mads broker
 
 # 2) Navigate to rerunner_plugin directory
-cd /Users/alberto/MECHATRONIC_ENGINEERING/ROBOTIC_PERCEPTION/PROJECT/PLUGIN/rerunner_plugin
+cd PLUGIN/rerunner_plugin
 
 # 3) Build rerunner plugin
 cmake --build build -j6
@@ -50,7 +50,7 @@ cmake --build build -j6
 mads sink build/rerunner.plugin
 
 # 5) Navigate to mads_filter_test directory
-cd "/Users/alberto/MECHATRONIC_ENGINEERING/ROBOTIC_PERCEPTION/PROJECT/PLUGIN/mads_filter_test"
+cd "../mads_filter_test"
 
 # 6) Build filter plugin
 cmake --build build -j6
@@ -59,7 +59,7 @@ cmake --build build -j6
 mads filter build/my_filter.plugin
 
 # 8) Navigate to replay_plugin directory
-cd "/Users/alberto/MECHATRONIC_ENGINEERING/ROBOTIC_PERCEPTION/PROJECT/PLUGIN/replay_plugin"
+cd "../replay_plugin"
 
 # 9) Build replay plugin
 cmake --build build -j6
@@ -78,11 +78,15 @@ Make the script executable:
 ```bash
 chmod +x run.sh
 ```
-
-Then launch the pipeline:
+Launch the pipeline with:
 ```bash
-./run.sh
+./run.sh <filter_name>
 ```
+Where `<filter_name>` can be:
+- `mads_filter_test`
+- `pose_estimation`
+
+
 
 Notes:
 - The directory paths are currently configured for macOS.

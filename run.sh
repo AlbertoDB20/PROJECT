@@ -11,9 +11,7 @@ echo "Detected OS: $OS"
 # Check filter argument
 FILTER_NAME="$1"
 if [ -z "$FILTER_NAME" ]; then
-    echo "Usage: ./run.sh <filter_directory_name>"
-    echo "Example: ./run.sh mads_filter_test"
-    echo "         ./run.sh pose_estimation_plugin"
+    echo "Usage: ./run.sh <mads_filter_test | pose_estimation>"
     exit 1
 fi
 
@@ -39,15 +37,14 @@ run_mads() {
     esac
 }
 
-# Base directory of the script
+# Base directory of script
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # -------------------------
 # 1) Start MADS broker
 # -------------------------
-BROKER_DIR="$BASE_DIR"
 echo "Starting MADS broker..."
-run_mads "mads broker" "$BROKER_DIR"
+run_mads "mads broker" "$BASE_DIR"
 sleep 3
 
 # -------------------------
@@ -59,19 +56,43 @@ cd "$RERUNNER_DIR" || exit
 cmake --build build -j6
 
 # -------------------------
-# 3) Execute mads sink
+# 3) Run mads sink (DEPENDENT ON FILTER)
 # -------------------------
 echo "Running mads sink..."
-run_mads "mads sink build/rerunner.plugin" "$RERUNNER_DIR"
+
+if [ "$FILTER_NAME" = "mads_filter_test" ]; then
+
+    run_mads "mads sink build/rerunner.plugin -n rerunner_test" "$RERUNNER_DIR"
+
+elif [ "$FILTER_NAME" = "pose_estimation" ]; then
+
+    run_mads "mads sink build/rerunner.plugin -n rerunner_pose" "$RERUNNER_DIR"
+
+else
+    echo "Unknown filter: $FILTER_NAME"
+    exit 1
+fi
 
 # -------------------------
 # 4) Build selected filter plugin
 # -------------------------
-FILTER_DIR="$BASE_DIR/PLUGIN/$FILTER_NAME"
-PLUGIN_FILE=$(ls "$FILTER_DIR/build/"*.plugin 2>/dev/null | head -n1)
+# Map filter names to correct directory names
+if [ "$FILTER_NAME" = "mads_filter_test" ]; then
+    FILTER_DIR="$BASE_DIR/PLUGIN/mads_filter_test"
+    FILTER_PLUGIN_FILE="my_filter.plugin"
 
+elif [ "$FILTER_NAME" = "pose_estimation" ]; then
+    FILTER_DIR="$BASE_DIR/PLUGIN/pose_estimation_plugin"
+    FILTER_PLUGIN_FILE="pose_estimation.plugin"
+
+else
+    echo "Unknown filter: $FILTER_NAME"
+    exit 1
+fi
+
+# Check dir exists
 if [ ! -d "$FILTER_DIR" ]; then
-    echo "ERROR: Filter '$FILTER_NAME' does not exist in PLUGIN/"
+    echo "ERROR: Filter directory '$FILTER_DIR' does not exist."
     exit 1
 fi
 
@@ -80,10 +101,19 @@ cd "$FILTER_DIR" || exit
 cmake --build build -j6
 
 # -------------------------
-# 5) Execute mads filter
+# 5) Run selected mads filter
 # -------------------------
-echo "Running mads filter: $FILTER_NAME ..."
-run_mads "mads filter $PLUGIN_FILE" "$FILTER_DIR"
+if [ "$FILTER_NAME" = "mads_filter_test" ]; then
+
+    echo "Running mads_filter_test..."
+    run_mads "mads filter build/my_filter.plugin" "$FILTER_DIR"
+
+elif [ "$FILTER_NAME" = "pose_estimation" ]; then
+
+    echo "Running pose_estimation..."
+    run_mads "mads filter build/pose_estimation.plugin" "$FILTER_DIR"
+
+fi
 
 # -------------------------
 # 6) Build replay plugin
@@ -94,12 +124,25 @@ cd "$REPLAY_DIR" || exit
 cmake --build build -j6
 
 # -------------------------
-# 7) Replay sources
+# 7) Always run encoders + htc
 # -------------------------
 echo "Running replay source (encoders)..."
 run_mads "mads source build/replay.plugin -n encoders" "$REPLAY_DIR"
 
 echo "Running replay source (htc)..."
 run_mads "mads source build/replay.plugin -n htc" "$REPLAY_DIR"
+
+# -------------------------
+# 8) Extra sources only for pose_estimation
+# -------------------------
+if [ "$FILTER_NAME" = "pose_estimation" ]; then
+
+    echo "Running replay source (realsense)..."
+    run_mads "mads source build/replay.plugin -n realsense" "$REPLAY_DIR"
+
+    echo "Running replay source (imu)..."
+    run_mads "mads source build/replay.plugin -n imu" "$REPLAY_DIR"
+
+fi
 
 echo "All commands launched. Check terminals for output."
