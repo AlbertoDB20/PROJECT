@@ -43,8 +43,8 @@ BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 # -------------------------
 # 1) Start MADS broker
 # -------------------------
-echo "Starting MADS broker..."
-run_mads "mads broker" "$BASE_DIR"
+echo "Starting MADS broker with configuration file..."
+run_mads "mads broker -s mads.ini" "$BASE_DIR"
 sleep 3
 
 # -------------------------
