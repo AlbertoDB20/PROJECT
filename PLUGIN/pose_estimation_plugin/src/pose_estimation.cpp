@@ -31,13 +31,6 @@
 using namespace std;
 using json = nlohmann::json;
 
-// TODO: Put this in mads.ini
-// Kinematic parameters   
-static constexpr double R_L = 0.0876;   // raggio ruota sinistra [m]
-static constexpr double R_R = 0.0886;   // raggio ruota destra [m]
-static constexpr double n0 = 4096;      // tics per giro
-static constexpr double b = 0.8313;     // distanza tra ruote [m]
-
 
 // Static variables to keep track of last encoder values and time
 static bool first = false;
@@ -295,15 +288,14 @@ public:
     // Call the parent class method to set the common parameters 
     // (e.g. agent_id, etc.)
     Filter::set_params(params);
+    
+    R_L = _params["R_L"];
+    R_R = _params["R_R"];
+    n0 = _params["n0"];
+    b = _params["b"];
 
-    // provide sensible defaults for the parameters by setting e.g.
-    _params["some_field"] = "default_value";
-    // more here...
-
-    // then merge the defaults with the actually provided parameters
-    // params needs to be cast to json
+    // then merge the defaults with the actually provided parameters params needs to be cast to json
     _params.merge_patch(*(json *)params);
-      
   }
 
   // Implement this method if you want to provide additional information
@@ -317,6 +309,12 @@ public:
   };
 
 private:
+  // kinematic parameters
+  double R_L;       // raggio ruota sinistra [m]
+  double R_R;       // raggio ruota destra [m]
+  double n0;        // tics per giro
+  double b;         // distanza tra ruote [m]
+
   // Data in input from sensors
   EncoderData encoder_data;
   HTCData htc_data;
@@ -360,6 +358,7 @@ int main(int argc, char const *argv[])
 
   // Set example values to params
   params["test"] = "value";
+
 
   // Set the parameters
   plugin.set_params(&params);
