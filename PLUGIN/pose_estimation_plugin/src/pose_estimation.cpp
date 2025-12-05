@@ -13,11 +13,13 @@
 # NOTICE: MADS Version 1.4.0
 */
 // Mandatory included headers
+
+#include <Eigen/Dense>          // N.B.: brew install eigen, then add in .vscode the header for this lib
+#include <cmath>
+#include <iostream>
 #include <filter.hpp>
 #include <nlohmann/json.hpp>
 #include <pugg/Kernel.h>
-
-// other includes as needed here
 
 // Define the name of the plugin
 #ifndef PLUGIN_NAME
@@ -38,6 +40,9 @@ static bool second = false;
 static int last_enc_L = 0;
 static int last_enc_R = 0;
 static double last_time = 0.0;
+bool ekf_first_init = true;
+
+// _________________________________________ CLASSES ______________________________________________
 
 // Define a class to store data from encoder
 class EncoderData {
@@ -64,8 +69,9 @@ public:
   float x;
   float y;
   float z;
+  double theta;
   double timecode;
-  RealsenseData() : x(0.0), y(0.0), z(0.0), timecode(0.0) {}
+  RealsenseData() : x(0.0), y(0.0), z(0.0), theta(0.0), timecode(0.0) {}
 };
 
 class IMUData{
@@ -73,8 +79,14 @@ public:
   float x;
   float y;
   float z;
+  float acc_x;
+  float acc_y;
+  float acc_z;
+  float gyro_x;
+  float gyro_y;
+  float gyro_z;
   double timecode;
-  IMUData() : x(0.0), y(0.0), z(0.0), timecode(0.0) {}
+  IMUData() : x(0.0), y(0.0), z(0.0), acc_x(0.0), acc_y(0.0), acc_z(0.0), gyro_x(0.0), gyro_y(0.0), gyro_z(0.0), timecode(0.0) {}
 };
 
 // Define a class to store pose data
@@ -87,6 +99,153 @@ public:
   double timecode;
   PoseData() : x(0.0), y(0.0), z(0.0), theta(0.0), timecode(0.0) {}
 };
+
+class ExtendedKalmanFilter {
+public:
+  // costruttore con parametri cinematica
+  ExtendedKalmanFilter(double R_L, double R_R, double wheel_base, int ticks_per_rev)
+  : R_L_(R_L), R_R_(R_R), b_(wheel_base), n0_(ticks_per_rev)
+  {
+    // stato iniziale [x,y,theta,v]
+    x_.setZero(); // [0,0,0,0]
+    // P iniziale come MATLAB
+    P_ = Eigen::Matrix4d::Zero();
+    P_(0,0) = 0.01; P_(1,1) = 0.01; P_(2,2) = 0.01; P_(3,3) = 0.1;
+
+    // Q come MATLAB
+    Q_ = Eigen::Matrix4d::Zero();
+    Q_(0,0) = 0.02; Q_(1,1) = 0.02; Q_(2,2) = 0.01; Q_(3,3) = 0.1;
+
+    // R enc (scalar on v) and R_rs (3x3) as MATLAB
+    R_enc_ = 0.05; // scalar (MATLAB: diag(0.05))
+    R_rs_ = Eigen::Matrix3d::Zero();
+    R_rs_(0,0) = 0.02; R_rs_(1,1) = 0.02; R_rs_(2,2) = 0.01;
+
+    initialized_ = false;
+  }
+
+  void init(double x0, double y0, double theta0, double v0, double t0) {
+    x_(0) = x0; x_(1) = y0; x_(2) = theta0; x_(3) = v0;
+    t_last_ = t0;
+    initialized_ = true;
+  }
+
+  bool isInitialized() const { return initialized_; }
+
+  // step: esegue prediction + encoder update + realsense update (se valido)
+  // imu_accel_x: linear accel along forward axis (m/s^2)
+  // imu_gyro_z: yaw rate (rad/s)
+  // nL, nR: tick increments since last call (integers)
+  // rs_valid: se la misura realsense è valida
+  void step(double t_now,
+            double imu_accel_x,
+            double imu_gyro_z,
+            int nL, int nR,
+            double rs_x, double rs_y, double rs_theta,
+            bool rs_valid)
+  {
+    if (!initialized_) {
+      // initialize with zeros if necessary
+      init(0.0, 0.0, 0.0, 0.0, t_now);
+    }
+
+    double dt = t_now - t_last_;
+    if (!std::isfinite(dt) || dt <= 0.0) dt = 0.0;
+
+    // ---------- Prediction ----------
+    double x = x_(0), y = x_(1), th = x_(2), v = x_(3);
+
+    // propagate state (same as MATLAB)
+    Eigen::Vector4d x_pred;
+    x_pred(0) = x + v * std::cos(th) * dt;
+    x_pred(1) = y + v * std::sin(th) * dt;
+    x_pred(2) = th + imu_gyro_z * dt; // omega from IMU gyroZ
+    x_pred(3) = v + imu_accel_x * dt; // v += a*dt
+
+    // Jacobian F (as in MATLAB)
+    Eigen::Matrix4d F;
+    F << 1, 0, -v*std::sin(th)*dt, std::cos(th)*dt,
+         0, 1,  v*std::cos(th)*dt, std::sin(th)*dt,
+         0, 0, 1,                 0,
+         0, 0, 0,                 1;
+
+    Eigen::Matrix4d P_pred = F * P_ * F.transpose() + Q_;
+
+    // ---------- Encoder update (velocity) ----------
+    if (dt > 0) {
+      // wheel angular velocities (rad/s)
+      double wL = (2.0*M_PI * static_cast<double>(nL) / static_cast<double>(n0_)) / dt;
+      double wR = (2.0*M_PI * static_cast<double>(nR) / static_cast<double>(n0_)) / dt;
+      double v_enc = 0.5 * (R_L_ * wL + R_R_ * wR); // linear forward velocity from encoders
+
+      // measurement model z = v (scalar)
+      double h = x_pred(3);
+      Eigen::RowVector4d H_enc; H_enc << 0, 0, 0, 1;
+
+      double S = (H_enc * P_pred * H_enc.transpose())(0,0) + R_enc_;
+      Eigen::Vector4d K = P_pred * H_enc.transpose() / S;
+
+      x_pred = x_pred + K * (v_enc - h);
+      P_pred = (Eigen::Matrix4d::Identity() - K * H_enc) * P_pred;
+    }
+    // else if dt==0 skip encoder update (no new info)
+
+    // ---------- RealSense update (x,y,theta) ----------
+    if (rs_valid) {
+      Eigen::Vector3d z_rs; z_rs << rs_x, rs_y, rs_theta;
+      Eigen::Vector3d h_rs; h_rs << x_pred(0), x_pred(1), x_pred(2);
+
+      Eigen::Matrix<double,3,4> H_rs;
+      H_rs << 1,0,0,0,
+              0,1,0,0,
+              0,0,1,0;
+
+      Eigen::Matrix3d Srs = H_rs * P_pred * H_rs.transpose() + R_rs_;
+      Eigen::Matrix<double,4,3> Krs = P_pred * H_rs.transpose() * Srs.inverse();
+
+      Eigen::Vector3d y_res = z_rs - h_rs;
+      // normalize angle residual
+      y_res(2) = std::atan2(std::sin(y_res(2)), std::cos(y_res(2)));
+
+      x_ = x_pred + Krs * y_res;
+      P_ = (Eigen::Matrix4d::Identity() - Krs * H_rs) * P_pred;
+    } else {
+      // no RS update
+      x_ = x_pred;
+      P_ = P_pred;
+    }
+
+    t_last_ = t_now;
+  }
+
+  // getters
+  Eigen::Vector4d getState() const { return x_; }
+  Eigen::Matrix4d getCovariance() const { return P_; }
+
+private:
+  // parameters
+  double R_L_, R_R_, b_;
+  int n0_;
+
+  bool initialized_;
+  double t_last_;
+
+  // EKF internal
+  Eigen::Vector4d x_;
+  Eigen::Matrix4d P_;
+  Eigen::Matrix4d Q_;
+  double R_enc_;
+  Eigen::Matrix3d R_rs_;
+};
+
+
+
+
+
+
+
+
+// _______________________________________________________________________________________________
 
 
 // Plugin class. This shall be the only part that needs to be modified,
@@ -131,7 +290,7 @@ public:
       }
     }
 
-    // Store data from HTC (position is a vector with x,y,z)
+    // Store data from Realsense (position is a vector with x,y,z)
     if (input.contains("message") && input["message"].contains("pose") && input["message"]["pose"].contains("position_rs")) {
       auto &P = input["message"]["pose"]["position_rs"];
       if (P.is_array() && P.size() >= 3) {
@@ -143,7 +302,13 @@ public:
         }
         if (P[2].is_number()) {
           realsense_data.z = P[2].get<float>();
-        } 
+        }
+      }
+      auto &A = input["message"]["pose"]["attitude"];
+      if(A.is_array() && A.size() >= 3){
+        if (A[2].is_number()){
+          realsense_data.theta = A[2].get<float>();
+        }
       }
     }
 
@@ -160,6 +325,33 @@ public:
         if (E[2].is_number()) {
           imu_data.z = E[2].get<float>();
         } 
+      }
+      auto &A = input["message"]["accel"];
+      if (A.is_array() && A.size() >= 3){
+        if (A.is_array() && A.size() >=3){
+          if (A[0].is_number()){
+            imu_data.acc_x = A[0].get<float>();
+          }
+          if (A[1].is_number()){
+            imu_data.acc_y = A[1].get<float>();
+          }
+          if (A[2].is_number()){
+            imu_data.acc_z = A[2].get<float>();
+          }
+        }
+      }
+
+      auto &G = input["message"]["gyro"];
+      if (G.is_array() && G.size() >= 3){
+        if (G[0].is_number()){
+          imu_data.gyro_x = G[0].get<float>();
+        }
+        if (G[1].is_number()){
+          imu_data.gyro_y = G[1].get<float>();
+        }
+        if (G[2].is_number()){
+          imu_data.gyro_z = G[2].get<float>();
+        }
       }
     }
     
@@ -225,6 +417,32 @@ public:
     double dy = M_PI * (n_Rk * R_R + n_Lk * R_L) / n0 * std::sin(pose_data_enc.theta);
     double dtheta = 2 * M_PI * (n_Rk * R_R - n_Lk * R_L) / (n0 * b);
 
+
+    // EKF update
+    ExtendedKalmanFilter ekf{ R_L, R_R, b, n0};
+
+    if (ekf_first_init) {
+      // inizializza lo stato EKF con lo stato corrente dei pose_data_enc (se vuoi)
+      // oppure con zeri: qui inizializzo con pose_data_enc se disponibili
+      ekf.init(pose_data_enc.x, pose_data_enc.y, pose_data_enc.theta, 0.0, encoder_data.timecode);
+      ekf_first_init = false;
+    }
+
+    // chiamata step EKF: dt = encoder_data.timecode - last_time (lo hai già calcolato)
+    bool rs_valid = true; // se hai modo di verificare realsense valid, imposta opportunamente
+
+    ekf.step(
+      encoder_data.timecode,
+      imu_data.acc_x,
+      imu_data.gyro_z,
+      n_Lk,
+      n_Rk,
+      realsense_data.x,
+      realsense_data.y,
+      realsense_data.theta,
+      rs_valid
+    );
+
     // ________ UPDATE POSE ________ 
 
     // Update pose from encoder
@@ -252,6 +470,15 @@ public:
     pose_data_imu.z = 0.0;          // assuming z=0 for imu
     pose_data_imu.timecode = imu_data.timecode;
 
+    // Pose data from EKF
+    Eigen::Vector4d xekf = ekf.getState();
+    pose_data_ekf.x = xekf(0);
+    pose_data_ekf.y = xekf(1);
+    pose_data_ekf.z = 0.0;          // assuming z=0 for EKF
+    pose_data_ekf.theta = xekf(2);
+    pose_data_ekf.timecode = encoder_data.timecode;
+
+
 
     // ________ CONSTRUCT OUTPUT __________ 
     out.clear();
@@ -268,6 +495,9 @@ public:
     out["position_htc"] = {pose_data_htc.x, pose_data_htc.y, pose_data_htc.z};
     out["position_realsense"] = {pose_data_realsense.x, pose_data_realsense.y, pose_data_realsense.z};
     out["position_imu"] = {pose_data_imu.x, pose_data_imu.y, pose_data_imu.z};
+    out["position_ekf"] = {pose_data_ekf.x, pose_data_ekf.y, pose_data_ekf.z};
+    out["attitude_ekf"] = pose_data_ekf.theta;
+    out["velocity_ekf"] = xekf(3);
 
 
     // _______ PRINT FOR DEBUG ___________
@@ -312,7 +542,7 @@ private:
   // kinematic parameters
   double R_L;       // raggio ruota sinistra [m]
   double R_R;       // raggio ruota destra [m]
-  double n0;        // tics per giro
+  int n0;        // tics per giro
   double b;         // distanza tra ruote [m]
 
   // Data in input from sensors
@@ -326,6 +556,7 @@ private:
   PoseData pose_data_htc;
   PoseData pose_data_realsense;
   PoseData pose_data_imu;
+  PoseData pose_data_ekf;
 };
 
 

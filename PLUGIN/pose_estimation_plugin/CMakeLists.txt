@@ -66,6 +66,10 @@ FetchContent_Populate(plugin
 
 include_directories(${plugin_SOURCE_DIR}/src)
 
+# --- Eigen --------------------------------------------------------------------
+find_package(Eigen3 REQUIRED NO_MODULE)
+
+
 
 # MACROS #######################################################################
 # Call: add_plugin(name [SRCS src1 src2 ...] [LIBS lib1 lib2 ...])
@@ -87,6 +91,7 @@ macro(add_plugin name)
     list(APPEND TARGET_LIST ${name}_main)
   endif()
   target_link_libraries(${name} PRIVATE pugg ${plugin_LIBS})
+  target_link_libraries(${name} PRIVATE Eigen3::Eigen)
   set_target_properties(${name} PROPERTIES PREFIX "")
   if (PLUGIN_SUFFIX)
     set_target_properties(${name} PROPERTIES SUFFIX "_${PLUGIN_SUFFIX}.plugin")
