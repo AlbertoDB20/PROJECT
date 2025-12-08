@@ -102,17 +102,15 @@ public:
 
 class ExtendedKalmanFilter {
 public:
-  // costruttore con parametri cinematica
+  // Constructor to zero-initialize matrices and parameters
   ExtendedKalmanFilter(double R_L, double R_R, double wheel_base, int ticks_per_rev)
   : R_L_(R_L), R_R_(R_R), b_(wheel_base), n0_(ticks_per_rev)
   {
-    // stato iniziale [x,y,theta,v]
-    x_.setZero(); // [0,0,0,0]
-    // P iniziale come MATLAB
+    x_.setZero();       // [0,0,0,0]
+    
     P_ = Eigen::Matrix4d::Zero();
     P_(0,0) = 0.01; P_(1,1) = 0.01; P_(2,2) = 0.01; P_(3,3) = 0.1;
 
-    // Q come MATLAB
     Q_ = Eigen::Matrix4d::Zero();
     Q_(0,0) = 0.02; Q_(1,1) = 0.02; Q_(2,2) = 0.01; Q_(3,3) = 0.1;
 
@@ -162,14 +160,15 @@ public:
     x_pred(2) = th + imu_gyro_z * dt; // omega from IMU gyroZ
     x_pred(3) = v + imu_accel_x * dt; // v += a*dt
 
-    // Jacobian F (as in MATLAB)
-    Eigen::Matrix4d F;
-    F << 1, 0, -v*std::sin(th)*dt, std::cos(th)*dt,
+    // Jacobian J (as in MATLAB), derivate of motion model w.r.t. state
+    Eigen::Matrix4d J;
+    J << 1, 0, -v*std::sin(th)*dt, std::cos(th)*dt,
          0, 1,  v*std::cos(th)*dt, std::sin(th)*dt,
          0, 0, 1,                 0,
          0, 0, 0,                 1;
 
-    Eigen::Matrix4d P_pred = F * P_ * F.transpose() + Q_;
+    // propagate covariance
+    Eigen::Matrix4d P_pred = J * P_ * J.transpose() + Q_;    
 
     // ---------- Encoder update (velocity) ----------
     if (dt > 0) {
@@ -180,7 +179,7 @@ public:
 
       // measurement model z = v (scalar)
       double h = x_pred(3);
-      Eigen::RowVector4d H_enc; H_enc << 0, 0, 0, 1;
+      Eigen::RowVector4d H_enc; H_enc << 0, 0, 0, 1;     
 
       double S = (H_enc * P_pred * H_enc.transpose())(0,0) + R_enc_;
       Eigen::Vector4d K = P_pred * H_enc.transpose() / S;
@@ -188,7 +187,6 @@ public:
       x_pred = x_pred + K * (v_enc - h);
       P_pred = (Eigen::Matrix4d::Identity() - K * H_enc) * P_pred;
     }
-    // else if dt==0 skip encoder update (no new info)
 
     // ---------- RealSense update (x,y,theta) ----------
     if (rs_valid) {
@@ -231,11 +229,11 @@ private:
   double t_last_;
 
   // EKF internal
-  Eigen::Vector4d x_;
-  Eigen::Matrix4d P_;
-  Eigen::Matrix4d Q_;
-  double R_enc_;
-  Eigen::Matrix3d R_rs_;
+  Eigen::Vector4d x_;       // state: [x,y,theta,v]
+  Eigen::Matrix4d P_;       // covariance matrix 
+  Eigen::Matrix4d Q_;       // process noise covariance 
+  double R_enc_;            // measurement noise covariance for encoder 
+  Eigen::Matrix3d R_rs_;    // measurement noise covariance for RealSense
 };
 
 
