@@ -11,7 +11,7 @@ echo "Detected OS: $OS"
 # Check filter argument
 FILTER_NAME="$1"
 if [ -z "$FILTER_NAME" ]; then
-    echo "Usage: ./run.sh <mads_filter_test | pose_estimation>"
+    echo "Usage: ./run.sh <mads_filter_test | pose_estimation | only_ekf>"
     exit 1
 fi
 
@@ -68,6 +68,10 @@ elif [ "$FILTER_NAME" = "pose_estimation" ]; then
 
     run_mads "mads sink build/rerunner.plugin -n rerunner_pose" "$RERUNNER_DIR"
 
+elif [ "$FILTER_NAME" = "only_ekf" ]; then
+
+    run_mads "mads sink build/rerunner.plugin -n rerunner_ekf_only" "$RERUNNER_DIR"
+
 else
     echo "Unknown filter: $FILTER_NAME"
     exit 1
@@ -82,6 +86,10 @@ if [ "$FILTER_NAME" = "mads_filter_test" ]; then
     FILTER_PLUGIN_FILE="my_filter.plugin"
 
 elif [ "$FILTER_NAME" = "pose_estimation" ]; then
+    FILTER_DIR="$BASE_DIR/PLUGIN/pose_estimation_plugin"
+    FILTER_PLUGIN_FILE="pose_estimation.plugin"
+
+elif [ "$FILTER_NAME" = "only_ekf" ]; then
     FILTER_DIR="$BASE_DIR/PLUGIN/pose_estimation_plugin"
     FILTER_PLUGIN_FILE="pose_estimation.plugin"
 
@@ -113,6 +121,10 @@ elif [ "$FILTER_NAME" = "pose_estimation" ]; then
     echo "Running pose_estimation..."
     run_mads "mads filter build/pose_estimation.plugin" "$FILTER_DIR"
 
+elif [ "$FILTER_NAME" = "only_ekf" ]; then
+    echo "Running only_ekf (pose_estimation)..."
+    run_mads "mads filter build/pose_estimation.plugin" "$FILTER_DIR"
+
 fi
 
 # -------------------------
@@ -135,14 +147,15 @@ run_mads "mads source build/replay.plugin -n htc" "$REPLAY_DIR"
 # -------------------------
 # 8) Extra sources only for pose_estimation
 # -------------------------
-if [ "$FILTER_NAME" = "pose_estimation" ]; then
+if [ "$FILTER_NAME" = "pose_estimation"  ] || [ "$FILTER_NAME" = "only_ekf" ]; then
 
     echo "Running replay source (realsense)..."
-    run_mads "mads source build/replay.plugin -n realsense" "$REPLAY_DIR"
+    run_mads "mads source build/replay.plugin -n H_initial_walker_aruco" "$REPLAY_DIR"
 
     echo "Running replay source (imu)..."
     run_mads "mads source build/replay.plugin -n imu" "$REPLAY_DIR"
 
 fi
+
 
 echo "All commands launched. Check terminals for output."
