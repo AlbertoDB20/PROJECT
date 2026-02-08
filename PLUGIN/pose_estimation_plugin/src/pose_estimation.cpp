@@ -111,284 +111,6 @@ public:
 };
 
 
-/*
-
-// TODO: check step() function!! 
-// TODO: check if mod done before are correct
-// TODO: update pdf on ipad
-class ExtendedKalmanFilter {          
-public:
-  // Constructor to zero-initialize matrices and parameters
-  ExtendedKalmanFilter(double R_L, double R_R, double wheel_base, int ticks_per_rev)
-  : R_L_(R_L), R_R_(R_R), b_(wheel_base), n0_(ticks_per_rev)
-  {
-    // State: [x, y, theta, v]
-    x_.setZero();      
-    
-    // Initial covariance P_
-    P_.setZero();
-    P_(0,0) = 0.01;   // x (m^2)
-    P_(1,1) = 0.01;   // y (m^2)
-    P_(2,2) = 0.01;   // theta (rad^2)
-    P_(3,3) = 0.1;    // velocity (m/s)^2
-
-    // Process noise coefficients
-    alpha_pos_ = 0.00002;   // prima 0.02
-    alpha_yaw_ = 0.0000001;   // prima 0.01
-    alpha_vel_ = 0.000001;    // prima 0.1
-    Q_.setZero();        // filled every prediction step
-
-    // Measurement noise
-    R_enc_ = 0.05;        // velocity measurement variance (m/s)^2
-    R_imu_yaw_ = 100;      // IMU yaw variance (rad^2)
-    
-    R_rs_.setZero();
-    R_rs_(0,0) = 0.02;   // x (m^2) 
-    R_rs_(1,1) = 0.02;   // y (m^2)
-    R_rs_(2,2) = 0.1;   // theta (rad^2)
-    
-    // R_rs_(0,0) = 0.1;   // x
-    // R_rs_(1,1) = 0.1;   // y
-    // R_rs_(2,2) = 0.05;  // theta
-    
-
-    initialized_ = false;
-  }
-
-  void init(double x0, double y0, double theta0, double v0, double t0) {
-    x_(0) = x0; x_(1) = y0; x_(2) = theta0; x_(3) = v0;
-    t_last_ = t0;
-    initialized_ = true;
-  }
-
-  bool isInitialized() const { return initialized_; }
-
-  // step: esegue prediction + encoder update + realsense update (se valido)
-  // imu_accel_x: linear accel along forward axis (m/s^2)
-  // imu_gyro_z: yaw rate (rad/s)
-  // nL, nR: tick increments since last call (integers)
-  // rs_valid: se la misura realsense è valida
-  void step(double t_now, 
-    double imu_accel_x, 
-    double imu_gyro_z, 
-    int nL, int nR,
-    double rs_x, double rs_y, double rs_theta, 
-    bool rs_valid) {
-
-    double dt = t_now - t_last_;
-    if (!std::isfinite(dt) || dt <= 0.0)
-      dt = 0.0;
-
-    // ---------- Prediction ----------
-    double x = x_(0), y = x_(1), th = x_(2), v = x_(3);
-
-    // propagate state
-    Eigen::Vector4d x_pred;
-    x_pred(0) = x + v * std::cos(th) * dt + 0.5 * imu_accel_x * std::cos(th) * dt * dt;
-    x_pred(1) = y + v * std::sin(th) * dt + 0.5 * imu_accel_x * std::sin(th) * dt * dt;
-    x_pred(2) = th + imu_gyro_z * dt + 0.5 * imu_accel_x / b_ * dt * dt; // omega from IMU gyroZ
-    x_pred(3) = v + imu_accel_x * dt; // v += a*dt (from IMU accelX, converted to m/s^2)
-
-    
-    // use encoder variation of ticks for prediction of position:
-    // Kinematic model (as in MATLAB)
-    // double dx = M_PI * (n_Rk * R_R + n_Lk * R_L) / n0 * std::cos(pose_data_enc.theta);
-    // double dy = M_PI * (n_Rk * R_R + n_Lk * R_L) / n0 * std::sin(pose_data_enc.theta);
-    // double dtheta = 2 * M_PI * (n_Rk * R_R - n_Lk * R_L) / (n0 * b);
-    //x_pred(0) = x + (M_PI * (nR * R_R_ + nL * R_L_) / n0_) * std::cos(th);
-    //x_pred(1) = y + (M_PI * (nR * R_R_ + nL * R_L_) / n0_) * std::sin(th);
-    //x_pred(2) = th + (2 * M_PI * (nR * R_R_ - nL * R_L_) / (n0_ * b_));
-    //x_pred(3) = v + imu_accel_x * dt; // v += a*dt (from IMU accelX, converted to m/s^2)
-    
-
-    // Jacobian J, derivate of motion model w.r.t. state
-    Eigen::Matrix4d J;
-    J<< 1, 0, -v * std::sin(th) * dt - 0.5*imu_accel_x*std::sin(th)*dt*dt, std::cos(th) * dt, 
-        0, 1,  v * std::cos(th) * dt + 0.5*imu_accel_x*std::cos(th)*dt*dt, std::sin(th) * dt, 
-        0, 0,                            1,                                        0, 
-        0, 0,                            0,                                        1;
-
-    // propagate covariance
-    Eigen::Matrix4d P_pred = J * P_ * J.transpose() + Q_;
-
-    // if i do not want to do the prediction step, set:
-    // P_pred = P_;
-
-    // ---------- Encoder update (velocity) ----------
-    if (dt > 0) {
-      // wheel angular velocities (rad/s)
-      double wL = (2.0 * M_PI * static_cast<double>(nL) / static_cast<double>(n0_)) / dt;
-      double wR = (2.0 * M_PI * static_cast<double>(nR) / static_cast<double>(n0_)) / dt;
-      double v_enc = 0.5 * (R_L_ * wL + R_R_ * wR); // linear forward velocity from encoders
-
-      // measurement model z = v (scalar)
-      double h = x_pred(3);
-      Eigen::RowVector4d H_enc;
-      H_enc << 0, 0, 0, 1;
-
-      double S = (H_enc * P_pred * H_enc.transpose())(0, 0) + R_enc_;
-      Eigen::Vector4d K = P_pred * H_enc.transpose() / S;
-
-      x_pred = x_pred + K * (v_enc - h);
-      P_pred = (Eigen::Matrix4d::Identity() - K * H_enc) * P_pred;
-    }
-
-    // ---------- RealSense update (x,y,theta) ----------
-    if (rs_valid) {
-      Eigen::Vector3d z_rs;
-      z_rs << rs_x, rs_y, rs_theta;
-      Eigen::Vector3d h_rs;
-      h_rs << x_pred(0), x_pred(1), x_pred(2);
-
-      Eigen::Matrix<double, 3, 4> H_rs;
-      H_rs << 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0;
-
-      Eigen::Matrix3d Srs = H_rs * P_pred * H_rs.transpose() + R_rs_;
-      Eigen::Matrix<double, 4, 3> Krs =
-          P_pred * H_rs.transpose() * Srs.inverse();
-
-      Eigen::Vector3d y_res = z_rs - h_rs;
-      // normalize angle residual
-      y_res(2) = std::atan2(std::sin(y_res(2)), std::cos(y_res(2)));
-
-      x_ = x_pred + Krs * y_res;
-      P_ = (Eigen::Matrix4d::Identity() - Krs * H_rs) * P_pred;
-    } else {
-      // no RS update
-      x_ = x_pred;
-      P_ = P_pred;
-    }
-
-    t_last_ = t_now;
-  }
-
-  void step_gpt(double t_now,
-          double imu_yaw,        // <-- from fusionPose (rad)
-          int nL, int nR,
-          double rs_x, double rs_y, double rs_theta,
-          bool rs_valid,
-          bool use_imu_yaw)
-  {
-    double dt = t_now - t_last_;
-
-    bool valid_dt = std::isfinite(dt) && dt > 1e-6;
-    if (!valid_dt) {
-        dt = 0.0;
-    }
-
-    // =========================================================
-    // ---------- PREDICTION STEP (ENCODER ONLY) ----------
-    // =========================================================
-
-    // Encoder-based incremental motion
-    double ds = M_PI * (nR * R_R_ + nL * R_L_) / n0_;
-    double dtheta = 2.0 * M_PI * (nR * R_R_ - nL * R_L_) / (n0_ * b_);
-    double v = (dt > 1e-6) ? ds / dt : x_(3);
-
-    Eigen::Vector4d x_pred;
-    double th = x_(2);
-    x_pred(0) = x_(0) + ds * cos(th + 0.5 * dtheta);
-    x_pred(1) = x_(1) + ds * sin(th + 0.5 * dtheta);
-    x_pred(2) = x_(2) + dtheta;
-    x_pred(3) = v;
-
-    Q_.setZero();               // process noise covariance computed at EACH step
-    if (valid_dt) {
-        Q_(0,0) = alpha_pos_ * ds * ds;
-        Q_(1,1) = alpha_pos_ * ds * ds;
-        Q_(2,2) = alpha_yaw_ * dtheta * dtheta;
-        Q_(3,3) = alpha_vel_ * v * v;
-    }
-
-
-    Eigen::Matrix4d J;
-    J<< 1, 0, -ds * sin(th + 0.5*dtheta),  cos(th + 0.5*dtheta) * dt,
-        0, 1,  ds * cos(th + 0.5*dtheta),  sin(th + 0.5*dtheta) * dt,
-        0, 0,               1,                      0,
-        0, 0,               0,                      1;
-
-    // Propagate covariance
-    Eigen::Matrix4d P_pred = J * P_ * J.transpose() + Q_;
-
-    // =========================================================
-    // ---------- IMU YAW UPDATE (OPTIONAL) ----------
-    // =========================================================
-    if (use_imu_yaw) {
-        // Measurement: z = yaw_IMU
-        double z = imu_yaw;
-        double h = x_pred(2);
-
-        Eigen::RowVector4d H;
-        H << 0, 0, 1, 0;
-
-        double S = (H * P_pred * H.transpose())(0,0) + R_imu_yaw_;
-        Eigen::Vector4d K = P_pred * H.transpose() / S;
-
-        double y_res = std::atan2(std::sin(z - h), std::cos(z - h));
-
-        x_pred += K * y_res;
-        P_pred = (Eigen::Matrix4d::Identity() - K * H) * P_pred;
-    }
-
-    // =========================================================
-    // ---------- REALSENSE UPDATE (ABSOLUTE POSE) ----------
-    // =========================================================
-    if (rs_valid) {
-        Eigen::Vector3d z_rs;
-        z_rs << rs_x, rs_y, rs_theta;
-
-        Eigen::Vector3d h_rs;
-        h_rs << x_pred(0), x_pred(1), x_pred(2);
-
-        Eigen::Matrix<double,3,4> H_rs;
-        H_rs << 1,0,0,0,
-                0,1,0,0,
-                0,0,1,0;
-
-        Eigen::Matrix3d Srs = H_rs * P_pred * H_rs.transpose() + R_rs_;
-        Eigen::Matrix<double,4,3> Krs = P_pred * H_rs.transpose() * Srs.inverse();
-
-        Eigen::Vector3d y_res = z_rs - h_rs;
-        y_res(2) = std::atan2(std::sin(y_res(2)), std::cos(y_res(2)));
-
-        x_ = x_pred + Krs * y_res;
-        P_ = (Eigen::Matrix4d::Identity() - Krs * H_rs) * P_pred;
-    } else {
-        x_ = x_pred;
-        P_ = P_pred;
-    }
-
-    t_last_ = t_now;
-  }
-
-
-  // getters
-  Eigen::Vector4d getState() const { return x_; }
-  Eigen::Matrix4d getCovariance() const { return P_; }
-
-private:
-  // parameters
-  double R_L_, R_R_, b_;
-  int n0_;
-
-  bool initialized_;
-  double t_last_;
-
-  // EKF internal
-  Eigen::Vector4d x_;       // state: [x,y,theta,v]
-  Eigen::Matrix4d P_;       // covariance matrix 
-  Eigen::Matrix4d Q_;       // process noise covariance 
-  double R_enc_;            // measurement noise covariance for encoder 
-  Eigen::Matrix3d R_rs_;    // measurement noise covariance for RealSense
-  double R_imu_yaw_;        // measurement noise covariance for IMU yaw
-  double alpha_pos_;        // position noise factor
-  double alpha_yaw_;        // yaw noise factor
-  double alpha_vel_;   // velocity noise factor
-};
-
-*/
-
-
 class ExtendedKalmanFilter {
 public:
     ExtendedKalmanFilter(double R_L, double R_R, double wheel_base, int ticks_per_rev)
@@ -399,24 +121,7 @@ public:
         
         // Covariance P
         P_.setIdentity();
-        P_ *= 0.1;
-
-        // Process Noise (Q) - Quanta fiducia ho nel mio modello cinematico (Encoder)
-        // Se il robot slitta molto, aumenta questi valori.
-        Q_.setZero();
-        Q_(0, 0) = 0.001; // x variance
-        Q_(1, 1) = 0.001; // y variance
-        Q_(2, 2) = 0.001; // theta variance
-
-        // Measurement Noise (R)
-        // Realsense
-        R_rs_.setZero();
-        R_rs_(0, 0) = 0.05;  // Bassa varianza = mi fido molto di Realsense X
-        R_rs_(1, 1) = 0.05;  // Y
-        R_rs_(2, 2) = 0.1;   // Theta
-
-        // IMU Yaw
-        var_imu_yaw_ = 0.05; // Mi fido dell'IMU per l'angolo
+        P_ *= 0.1;        
 
         initialized_ = false;
     }
@@ -425,6 +130,27 @@ public:
         x_(0) = x0; x_(1) = y0; x_(2) = theta0;
         t_last_ = t0;
         initialized_ = true;
+    }
+
+    // Tuning method to update Q and R matrices
+    void set_tuning(double q_pos, double q_yaw, double r_imu, double r_rs_pos, double r_rs_yaw) {
+        // Aggiorna Q (Incertezza modello/encoder)
+        Q_.setZero();
+        Q_(0,0) = q_pos; 
+        Q_(1,1) = q_pos;
+        Q_(2,2) = q_yaw;
+
+        // Aggiorna R IMU
+        R_imu_.setZero();
+        R_imu_(0,0) = r_imu; 
+
+        // Aggiorna R Realsense
+        R_rs_.setZero();
+        R_rs_(0,0) = r_rs_pos; 
+        R_rs_(1,1) = r_rs_pos;
+        R_rs_(2,2) = r_rs_yaw;
+        
+        // cout << "[EKF Tuning] Matrici aggiornate" << endl;
     }
 
     // STATE PREDICTION (usando Encoders come Input di controllo)
@@ -506,7 +232,7 @@ public:
         double y_res = z - x_(2);
         y_res = std::atan2(std::sin(y_res), std::cos(y_res)); // Normalizza
 
-        double S = (H * P_ * H.transpose())(0,0) + var_imu_yaw_;
+        double S = (H * P_ * H.transpose())(0,0) + R_imu_(0,0);
         Eigen::Vector3d K = P_ * H.transpose() / S;
 
         x_ = x_ + K * y_res;
@@ -522,7 +248,7 @@ private:
     Eigen::Matrix3d P_; // Covariance
     Eigen::Matrix3d Q_; // Process Noise
     Eigen::Matrix3d R_rs_; // Realsense Noise
-    double var_imu_yaw_; // IMU Yaw Noise
+    Eigen::Matrix3d R_imu_; // IMU Noise (only yaw)
 
     double R_L_, R_R_, b_;
     int n0_;
@@ -549,8 +275,6 @@ public:
   return_type load_data(json const &input, string topic = "") override {
 
     // Store data from encoders
-    // Store data from encoders if (topic == "encoders") { auto &E = input["message"]["encoders"]; if(REAL_TIME){ auto &E = input["encoders"]; } if (E.contains("left") && E["left"].is_number()) { encoder_data.left_encoder = E["left"].get<int>(); if(!second){ first = true; } } if (E.contains("right") && E["right"].is_number()) { encoder_data.right_encoder = E["right"].get<int>(); } auto &T = input["message"]["timecode"]; if(REAL_TIME){ auto &T = input["timecode"]; } if (T.is_number()){ encoder_data.timecode = T.get<double>(); } }
-
     if (topic == "encoders") {
       printf("Storing encoder data...\n");
       const auto &root = REAL_TIME ? input : input["message"];
@@ -683,257 +407,6 @@ public:
     return return_type::success;
   }
 
-  /*
-  return_type process(json &out) override {
-    
-    // 0 _______ ELABORATE ENCODER DATA TO GET POSE ESTIMATE _______
-
-    if (first) {
-      last_enc_L = encoder_data.left_encoder;
-      last_enc_R = encoder_data.right_encoder;
-      last_time = encoder_data.timecode;
-      second = true;
-      first = false;
-      cout << "First run initialization done." << endl;
-    }
-
-    // Compute variation of the encoder ticks: Δtic
-    int n_Lk = encoder_data.left_encoder - last_enc_L;
-    int n_Rk = encoder_data.right_encoder - last_enc_R;
-
-    // Update last encoder values
-    last_enc_L = encoder_data.left_encoder;
-    last_enc_R = encoder_data.right_encoder;
-
-    // Compute time difference
-    double dt = encoder_data.timecode - last_time;
-    if (!std::isfinite(dt) || dt <= 0){
-      dt = 0;
-    }
-
-    // Kinematic model
-    double dx = M_PI * (n_Rk * R_R + n_Lk * R_L) / n0 * std::cos(pose_data_enc.theta);
-    double dy = M_PI * (n_Rk * R_R + n_Lk * R_L) / n0 * std::sin(pose_data_enc.theta);
-    double dtheta = 2 * M_PI * (n_Rk * R_R - n_Lk * R_L) / (n0 * b);
-    
-    // Update pose from encoder
-    pose_data_enc.x += dx;
-    pose_data_enc.y += dy;
-    pose_data_enc.z = 0.0;          // assuming z=0 for encoders
-    pose_data_enc.theta += dtheta;
-    pose_data_enc.timecode = encoder_data.timecode;
-
-    cout << "Pose from Encoders: x = " << pose_data_enc.x
-         << ", y = " << pose_data_enc.y
-         << ", theta = " << pose_data_enc.theta << endl;
-
-
-
-    // 1 _______ ELABORATE HTC DATA TO GET POSE ESTIMATE _______
-
-    pose_data_htc.x = htc_data.x;
-    pose_data_htc.y = htc_data.y;
-    pose_data_htc.z = 0.0;          // assuming z=0 for HTC
-    pose_data_htc.timecode = htc_data.timecode;
-
-
-
-    // 2 _______ ELABORATE REALSENSE DATA TO GET POSE ESTIMATE _______
-
-    pose_data_realsense.x = realsense_data.x;
-    pose_data_realsense.y = realsense_data.y;
-    pose_data_realsense.z = 0.0;    // assuming z=0 for realsense
-    pose_data_realsense.timecode = realsense_data.timecode;
-
-      DUROOOOO
-    */ 
-
-    /* MINE VERSION
-    // 3 _______ ELABORATE IMU DATA TO GET ROVER-FRAME ACCELERATIONS _______
-    // TODO 1: is this correct?
-    // IMU x → rover y     IMU y → rover x    IMU z → rover -z
-    Eigen::Matrix3f R_imu_to_rover;
-    R_imu_to_rover << 0, 1, 0, 
-                      1, 0, 0, 
-                      0, 0, -1; 
-
-    // Raw IMU acceleration (in g)
-    Eigen::Vector3f a_raw_g(imu_data.acc_x, imu_data.acc_y, imu_data.acc_z);
-
-    // Convert to m/s² and rotate to rover frame
-    Eigen::Vector3f a_OP = R_imu_to_rover * (a_raw_g * 9.81f);
-
-    // angular velocity
-    float w_dot_z = 0.0f;
-    if (dt > 1e-6f) {
-      w_dot_z = (imu_data.gyro_z - prev_w_z) / dt;
-    }
-    prev_w_z = imu_data.gyro_z;
-
-    Eigen::Vector3f w(0.0f, 0.0f, imu_data.gyro_z);
-    Eigen::Vector3f w_dot(0.0f, 0.0f, w_dot_z);
-
-    // imu position relative to rover RF
-    Eigen::Vector3f r_MP(0.70f, -0.20f, 0.0f);
-
-    // Compute rover-frame acceleration at O (origin)
-    Eigen::Vector3f a_OM = a_OP - w_dot.cross(r_MP) - w.cross(w.cross(r_MP));
-
-    // Integrate acceleration → velocity
-    x_dot_OM += a_OM.x() * dt;
-    y_dot_OM += a_OM.y() * dt;
-    z_dot_OM += a_OM.z() * dt;
-
-    // Integrate velocity → position
-    pose_data_imu.x += x_dot_OM * dt;
-    pose_data_imu.y += y_dot_OM * dt;
-    pose_data_imu.z += z_dot_OM * dt;    // assuming z=0 for IMU
-    //pose_data_imu.x = 0.0;   // not used
-    //pose_data_imu.y = 0.0;   // not used
-    //pose_data_imu.z = 0.0;   // not used
-
-    // Integrate yaw and normalize to [-π, π]
-    pose_data_imu.theta += imu_data.gyro_z * dt;
-    pose_data_imu.theta = std::atan2(std::sin(pose_data_imu.theta),
-                                     std::cos(pose_data_imu.theta));
-
-    pose_data_imu.timecode = imu_data.timecode;
-    */
-
-    /*
-    // 3 _______ ELABORATE IMU DATA TO GET ROVER-FRAME ACCELERATIONS _______
-    // set to zero on first run
-    if (first_imu) {
-      prev_w_z = imu_data.gyro_z;
-      first_imu = false;
-    }
-
-    // IMU x → rover y     IMU y → rover x    IMU z → rover -z
-    Eigen::Matrix3f R_imu_to_rover;
-    R_imu_to_rover << 0, 1, 0, 
-                      1, 0, 0, 
-                      0, 0, 1;        // SINISTRORSO 
-
-    // Raw IMU acceleration (in g) --> acceleration of IMU frame seen in IMU frame
-    Eigen::Vector3f a_raw_g(imu_data.acc_x, imu_data.acc_y, imu_data.acc_z);
-
-    // Convert to m/s² and rotate to rover frame --> acceleration of IMU frame seen in rover frame
-    Eigen::Vector3f a_PM = R_imu_to_rover * (a_raw_g * 9.81f);
-
-    // ------------------------------------------------------------------
-    // NEW: Rotate rover-frame acceleration to WORLD frame using yaw
-    // ------------------------------------------------------------------
-    float yaw = imu_data.fusion_yaw;
-
-    float c = std::cos(yaw);
-    float s = std::sin(yaw);
-
-    Eigen::Matrix3f R_rover_to_world;
-    R_rover_to_world << c, -s, 0,
-                        s,  c, 0,
-                        0,  0, 1;
-
-    // Compute acceleration of IMU in IMU frame --> acceleration of IMU frame seen in WORLD frame
-    Eigen::Vector3f a_PO = R_rover_to_world * a_PM;
-
-    // angular velocity
-    float w_dot_z = 0.0f;
-    if (dt > 1e-6f) {
-      w_dot_z = (imu_data.gyro_z - prev_w_z) / dt;
-    }
-    prev_w_z = imu_data.gyro_z;
-
-    Eigen::Vector3f w(0.0f, 0.0f, imu_data.gyro_z);
-    Eigen::Vector3f w_dot(0.0f, 0.0f, w_dot_z);
-
-    // imu position relative to rover RF
-    Eigen::Vector3f r_MP(0.70f, -0.20f, 0.0f);
-
-    // Compute rover-frame acceleration at O (origin) --> acceleration of rover frame seen in WORLD frame
-    Eigen::Vector3f a_MO = a_PO - w_dot.cross(r_MP) - w.cross(w.cross(r_MP));
-
-    // ------------------------------------------------------------------
-    // NEW: Remove gravity using roll and pitch from fusionPose
-    // fusionPose is assumed to be [roll, pitch, yaw] in radians.
-    // ------------------------------------------------------------------
-    float roll  = imu_data.fusion_roll;
-    float pitch = imu_data.fusion_pitch;
-
-    Eigen::Vector3f g_rover;
-    g_rover.x() = -9.81f * std::sin(pitch);                           // approx zero, just considered by removing offsets.
-    g_rover.y() =  9.81f * std::sin(roll) * std::cos(pitch);          // approx zero, just considered by removing offsets.
-    g_rover.z() =  9.81f * std::cos(roll) * std::cos(pitch);
-
-    cout << endl << endl << " ----> roll, pitch, yaw: " << roll << ", " << pitch << ", " << imu_data.fusion_yaw << " | g_rover_x: " << g_rover.x() << ", g_rover_y: " << g_rover.y() << ", g_rover_z: " << g_rover.z() << endl;
-
-    a_MO -= g_rover;   // now a_MO is linear acceleration in rover frame
-
-    // ------------------------------------------------------------------
-    // Integrate acceleration → velocity (WORLD frame)
-    // ------------------------------------------------------------------
-    x_dot_MO += a_MO.x() * dt;
-    y_dot_MO += a_MO.y() * dt;
-    z_dot_MO += a_MO.z() * dt;
-
-    // ------------------------------------------------------------------
-    // Integrate velocity → position (WORLD frame)
-    // ------------------------------------------------------------------
-    pose_data_imu.x += x_dot_MO * dt;
-    pose_data_imu.y += y_dot_MO * dt;
-    pose_data_imu.z += z_dot_MO * dt;    // assuming z ≈ constant
-
-    // ------------------------------------------------------------------
-    // NEW: Orientation comes directly from fusionPose (DO NOT integrate gyro)
-    // ------------------------------------------------------------------
-    pose_data_imu.theta = yaw;
-    pose_data_imu.theta = std::atan2(std::sin(pose_data_imu.theta),
-                                     std::cos(pose_data_imu.theta));
-    
-    pose_data_imu.timecode = imu_data.timecode;
-
-
-
-
-    // 4 _______ UPDATE EKF _______
-    
-    //PREVIOUS MINE VERSION
-    ekf_ptr->step(
-      encoder_data.timecode,
-      a_MO.x(),
-      imu_data.gyro_z,
-      n_Lk,
-      n_Rk,
-      pose_data_realsense.x,
-      pose_data_realsense.y,
-      pose_data_realsense.theta,
-      rs_valid
-    );
-    */
-     
-    // GPT VERSION
-    /*
-    ekf_ptr->step_gpt(
-        encoder_data.timecode,           // time
-        imu_data.fusion_yaw,             // IMU yaw (rad)
-        n_Lk,                            // left encoder ticks
-        n_Rk,                            // right encoder ticks
-        pose_data_realsense.x,           // RealSense x
-        pose_data_realsense.y,           // RealSense y
-        pose_data_realsense.theta,       // RealSense theta
-        rs_valid,                        // RealSense valid
-        use_imu                          // use IMU yaw update
-    );
-   */
-
-    /*
-    // Pose data from EKF
-    Eigen::Vector4d xekf = ekf_ptr->getState();
-    pose_data_ekf.x = xekf(0);
-    pose_data_ekf.y = xekf(1);
-    pose_data_ekf.z = 0.01;          // assuming small offset in z
-    pose_data_ekf.theta = xekf(2);
-    pose_data_ekf.timecode = encoder_data.timecode;
-    */
 
   return_type process(json &out) override {
     
@@ -1068,7 +541,6 @@ public:
 
 
     // 6 _______ PRINT FOR DEBUG ___________
-
     if (PRINT_OUTPUT){
       //cout << "\n\n___________ Output data: ____________\n\n" << out.dump(2) << endl;
       cout << "\n\n___________ Computed Pose Data: ____________\n\n";
@@ -1079,33 +551,43 @@ public:
       //cout << "Time difference dt = " << dt << " seconds" << endl;
       //cout << "dx = " << dx << ", dy = " << dy << ", dtheta = " << dtheta << endl;
     }
+    
     return return_type::success;
   }
   
   void set_params(void const *params) override {
-    // Call the parent class method to set the common parameters 
-    // (e.g. agent_id, etc.)
-    Filter::set_params(params);
-
-    a_x_off_imu = _params["a_x_off_imu"];
-    a_y_off_imu = _params["a_y_off_imu"];
-    w_z_off_imu = _params["w_z_off_imu"];
     
+    Filter::set_params(params);
+    _params.merge_patch(*(json *)params);
+
+    // 1.A. PHYSICAL PARAMETERS
     R_L = _params["R_L"];
     R_R = _params["R_R"];
     n0 = _params["n0"];
     b = _params["b"];
 
-    ekf_ptr = std::make_unique<ExtendedKalmanFilter>(R_L, R_R, b, n0);
+    // 1.B. SENSOR OFFSETS (from calibration)
+    a_x_off_imu = _params["a_x_off_imu"];
+    a_y_off_imu = _params["a_y_off_imu"];
+    w_z_off_imu = _params["w_z_off_imu"];
 
+    // 1:C. EKF TUNING PARAMETERS
+    double q_p = _params["q_pos"];          // process noise for position
+    double q_y = _params["q_yaw"];          // process noise for yaw
+    double r_i = _params["r_imu_yaw"];      // measurement noise for IMU yaw
+    double r_rp = _params["r_rs_pos"];     // measurement noise for Realsense position
+    double r_ry = _params["r_rs_yaw"];     // measurement noise for Realsense yaw
+
+    // 2. EKF INITIALIZATION
+    ekf_ptr = std::make_unique<ExtendedKalmanFilter>(R_L, R_R, b, n0);
     if (ekf_first_init) {
-      //ekf_ptr->init(pose_data_enc.x, pose_data_enc.y, pose_data_enc.theta, 0.0,encoder_data.timecode);
       ekf_ptr->init(0.0, 0.0, 0.0, encoder_data.timecode); // Partiamo da 0
       ekf_first_init = false;
     }
 
-    // then merge the defaults with the actually provided parameters params needs to be cast to json
-    _params.merge_patch(*(json *)params);
+    // 3. EKF TUNING (da calibrare empiricamente)
+    ekf_ptr->set_tuning(q_p, q_y, r_i, r_rp, r_ry);
+
   }
 
   // Implement this method if you want to provide additional information
