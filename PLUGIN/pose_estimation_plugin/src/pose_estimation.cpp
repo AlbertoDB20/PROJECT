@@ -29,6 +29,9 @@ Creation date: 2025-11-28T17:25:29.889+0100 # NOTICE: MADS Version 1.4.0
 #define PRINT_INPUT 0
 #define PRINT_OUTPUT 0
 #define REAL_TIME 0 // 1 for real-time operation, 0 for offline processing
+#define USE_IMU 0 // 1 if IMU data is available and should be used in the EKF update, 0 otherwise
+#define USE_REALSENSE 1 // 1 if Realsense data is available and should be used in the EKF update, 0 otherwise
+#define USE_COMPASS 1 // 1 if Compass data is available and should be used to correct the heading, 0 otherwise
 
 // Load the namespaces
 using namespace std;
@@ -39,18 +42,13 @@ static bool first = false;
 static bool second = false;
 static int last_enc_L = 0;
 static int last_enc_R = 0;
-static double last_time = 0.0;
-bool ekf_first_init = true;
-bool rs_valid = true; // realsense validity, true for use in EKF
-bool use_imu = true;  // use imu yaw in EKF update
-bool first_imu = true;
-static float prev_w_z = 0.0;
-static double x_dot_MO = 0.0;
-static double y_dot_MO = 0.0;
-static double z_dot_MO = 0.0;
 
-// _________________________________________ CLASSES
-// ______________________________________________
+bool rs_valid = true; // realsense validity, true for use in EKF
+bool first_imu = true;
+
+
+
+// _________________________________________ CLASSES ______________________________________________
 
 // Define a class to store ENCODER data
 class EncoderData {
@@ -94,11 +92,14 @@ public:
   double fusion_roll;
   double fusion_pitch;
   double fusion_yaw;
+  double compass_x;
+  double compass_y;
+  double compass_z;
   double timecode;
   IMUData()
       : acc_x(0.0), acc_y(0.0), acc_z(0.0), gyro_x(0.0), gyro_y(0.0),
         gyro_z(0.0), fusion_roll(0.0), fusion_pitch(0.0), fusion_yaw(0.0),
-        timecode(0.0) {}
+        compass_x(0.0), compass_y(0.0), compass_z(0.0), timecode(0.0) {}
 };
 
 // Define a class to store POSE data
@@ -155,15 +156,17 @@ public:
     R_rs_(2, 2) = r_rs_yaw;
   }
 
-  void predict(double t_now, int nL, int nR) {
+  void predict(double t_now, int nL, int nR, double dt) {
     if (!initialized_)
       return;
 
+    /* 
     double dt = t_now - t_last_;
     if (dt <= 0.00001 || dt > 1.0) { // Check dt validi
       t_last_ = t_now;
       return;
     }
+    */
 
     // 1. Cinematica
     double d_left = (2.0 * M_PI * R_L_ * nL) / n0_;
@@ -218,21 +221,20 @@ public:
     x_(2) = std::atan2(std::sin(x_(2)), std::cos(x_(2)));
   }
 
-  void update_imu(double imu_yaw) {
+  void update_imu(double imu_gyro_z, double dt_imu) {
     if (!initialized_)
       return;
 
     // --- FIX LOGICA IMU ---
     // Niente offset strani. Assumiamo che imu_yaw sia nello stesso frame
     // ENU/NED Se l'IMU è ruotata, gestiscilo nel "load_data", non qui dentro.
-    double z = imu_yaw;
+    double z = imu_gyro_z * dt_imu;     // Integrazione angolare
     Eigen::RowVector3d H;
     H << 0, 0, 1; // Misuriamo solo Theta
 
     // Calcolo residuo angolare corretto
     double y_res = z - x_(2);
-    y_res =
-        std::atan2(std::sin(y_res), std::cos(y_res)); // Normalizza tra -PI e PI
+    y_res = std::atan2(std::sin(y_res), std::cos(y_res)); // Normalizza tra -PI e PI
 
     double S = (H * P_ * H.transpose())(0, 0) + R_imu_(0, 0);
     // K è un vettore 3x1 (guadagno su x, y, theta dato l'errore di angolo)
@@ -241,6 +243,38 @@ public:
     x_ = x_ + K * y_res;
     P_ = (Eigen::Matrix3d::Identity() - K * H) * P_;
     x_(2) = std::atan2(std::sin(x_(2)), std::cos(x_(2)));
+  }
+
+  double update_compass(double mx, double my, double mz) {
+    // --- 1. CALIBRAZIONE (Valori ottenuti dallo script MATLAB) ---
+    // Inserisci qui i risultati del calcolo Hard-Iron
+    const double offset_x = -4.9091; // Esempio: valore medio x
+    const double offset_y = -4.9091;  // Esempio: valore medio y
+    const double scale_x  = 0.5862;    // Opzionale: correzione ellitticità
+    const double scale_y  = 3.3986;
+
+    double mx_corr = (mx - offset_x) * scale_x;
+    double my_corr = (my - offset_y) * scale_y;
+
+    // --- 2. CALCOLO HEADING (Angolo Magnetico) ---
+    // Usiamo -my perché, come da tuo datasheet, l'asse Z/rotazione è invertito
+    double compass_yaw = std::atan2(-my_corr, mx_corr);
+
+    // --- 3. ALLINEAMENTO INIZIALE (Relativo allo "0" del Walker) ---
+    // La bussola punta al Nord, ma il tuo robot all'avvio punta verso lo "0" degli encoder.
+    if (!compass_initialized) {
+        compass_offset = compass_yaw; 
+        compass_initialized = true;
+        std::cout << "Compass aligned to robot zero. Offset: " << compass_offset << std::endl;
+    }
+
+    // Calcolo l'angolo relativo alla posizione di partenza
+    double yaw_measured = compass_yaw - compass_offset;
+
+    // Normalizzazione nell'intervallo [-PI, PI]
+    yaw_measured = std::atan2(std::sin(yaw_measured), std::cos(yaw_measured));
+
+    return yaw_measured;
   }
 
   Eigen::Vector3d getState() const { return x_; }
@@ -264,6 +298,14 @@ private:
   int n0_;
   bool initialized_;
   double t_last_;
+
+  bool compass_initialized = false;
+  double compass_offset = 0.0;
+
+  // Velocità lineari nel World Frame (per l'integrazione)
+  float x_dot_MO = 0.0f, y_dot_MO = 0.0f; 
+  float prev_w_z = 0.0f;
+  double last_accel_time = 0.0;
 };
 
 // _______________________________________________________________________________________________
@@ -356,10 +398,10 @@ public:
         const auto &A = root["accel"];
         if (A.is_array() && A.size() >= 3) {
           if (A[0].is_number())
-            imu_data.acc_x = A[0].get<float>(); // - a_x_off_imu; // g
+            imu_data.acc_x = A[1].get<float>(); // - a_x_off_imu; // g
 
           if (A[1].is_number())
-            imu_data.acc_y = A[1].get<float>(); // - a_y_off_imu;
+            imu_data.acc_y = A[0].get<float>(); // - a_y_off_imu;
 
           if (A[2].is_number())
             imu_data.acc_z = A[2].get<float>();
@@ -373,8 +415,7 @@ public:
           if (G[1].is_number())
             imu_data.gyro_y = G[1].get<float>();
           if (G[2].is_number())
-            imu_data.gyro_z =
-                G[2].get<float>(); // - w_z_off_imu; // Z axis inverted
+            imu_data.gyro_z = - G[2].get<float>(); // - w_z_off_imu; // Z axis inverted
         }
       }
       if (root.contains("fusionPose")) {
@@ -386,6 +427,17 @@ public:
             imu_data.fusion_pitch = F[1].get<double>();
           if (F[2].is_number())
             imu_data.fusion_yaw = F[2].get<double>();
+        }
+      }
+      if (root.contains("compass")) {
+        const auto &C = root["compass"];
+        if (C.is_array() && C.size() >= 3) {
+          if (C[0].is_number())
+            imu_data.compass_x = C[0].get<double>();
+          if (C[1].is_number())
+            imu_data.compass_y = C[1].get<double>();
+          if (C[2].is_number())
+            imu_data.compass_z = C[2].get<double>();
         }
       }
       if (root.contains("timecode") && root["timecode"].is_number()) {
@@ -417,7 +469,9 @@ public:
     if (first) {
       last_enc_L = encoder_data.left_encoder;
       last_enc_R = encoder_data.right_encoder;
-      last_time = encoder_data.timecode;
+      last_time_enc = encoder_data.timecode;
+      last_time_imu = imu_data.timecode;
+      last_time_rs = realsense_data.timecode;
       second = true;
       first = false;
       // Inizializza l'EKF con la prima posizione nota (es. 0 o da Realsense se
@@ -438,24 +492,34 @@ public:
     // --- STEP 1: PREDICTION (Cinematica Encoder) ---
     // Passiamo i tick crudi e il tempo attuale. L'EKF calcola v, omega e sposta
     // lo stato.
-    float dt = encoder_data.timecode - last_time;
-    last_time = encoder_data.timecode;
-    ekf_ptr->predict(encoder_data.timecode, n_Lk, n_Rk);
+    float dt_enc = encoder_data.timecode - last_time_enc;
+    last_time_enc = encoder_data.timecode;
+    ekf_ptr->predict(encoder_data.timecode, n_Lk, n_Rk, dt_enc);
 
     // --- STEP 2: UPDATE (Correzioni) ---
     // A. Update IMU (Corregge solo l'angolo Theta)
     // Usa fusion_yaw che è già filtrato internamente dall'IMU (di solito molto
     // buono) Nota: Assicurati che fusion_yaw sia nello stesso frame (zero allo
     // start) o gestisci l'offset.
-    if (use_imu) {
-      ekf_ptr->update_imu(imu_data.fusion_yaw);
+    double dt_imu = imu_data.timecode - last_time_imu;
+    last_time_imu = imu_data.timecode;
+    if (USE_IMU) {
+      ekf_ptr->update_imu(imu_data.gyro_z, dt_imu);
     }
 
     // B. Update Realsense (Corregge X, Y, Theta)
-    if (rs_valid) { // rs_valid dovrebbe essere true se i dati RS sono freschi e
-                    // affidabili
-      ekf_ptr->update_realsense(realsense_data.x, realsense_data.y,
-                                realsense_data.theta);
+    double dt_rs = realsense_data.timecode - last_time_rs;
+    last_time_rs = realsense_data.timecode;
+    if (rs_valid && USE_REALSENSE) { // rs_valid dovrebbe essere true se i dati RS sono freschi e affidabili
+      ekf_ptr->update_realsense(realsense_data.x, realsense_data.y, realsense_data.theta);
+    }
+
+    // C. Update Compass (Corregge Theta)
+    // Se hai una bussola, puoi usarla per correggere l'angolo. La funzione
+    // update_compass gestisce calibrazione e allineamento iniziale.
+    if(USE_COMPASS){
+      double yaw_measured = ekf_ptr->update_compass(imu_data.compass_x, imu_data.compass_y, imu_data.compass_z); // Usa i dati dell'IMU per il compass update
+      ekf_ptr->update_imu(yaw_measured, dt_imu); // Tratta il compass update come un'ulteriore correzione sull'angolo
     }
 
     // --- RECUPERO OUTPUT ---
@@ -464,6 +528,10 @@ public:
     pose_data_ekf.y = x_est(1);
     pose_data_ekf.theta = x_est(2);
     pose_data_ekf.z = 0.0;
+
+    // --- CALCOLO MSE (Qui è il posto giusto!) ---
+    // Usiamo i dati HTC come ground truth
+    compute_mse(htc_data.x, htc_data.y, pose_data_ekf.x, pose_data_ekf.y);
 
     // Costruzione JSON di output (simile al tuo codice originale)
     // 1 _______ ELABORATE HTC DATA TO GET POSE ESTIMATE _______
@@ -476,7 +544,7 @@ public:
     pose_data_realsense.x = realsense_data.x;
     pose_data_realsense.y = realsense_data.y;
     pose_data_realsense.z = 0.0; // assuming z=0 for realsense
-    pose_data_realsense.timecode = realsense_data.timecode;
+    pose_data_realsense.timecode = encoder_data.timecode; //realsense_data.timecode;     // TODO:check
 
     // --- CALCOLO ODOMETRIA PURA (Solo per visualizzazione divergenza) ---
     // Calcolo spostamenti incrementali
@@ -504,12 +572,12 @@ public:
       double acc_y_world = (imu_data.acc_x * 9.81) * std::sin(yaw_imu);
 
       // 2. Prima integrazione: Accelerazione -> Velocità
-      x_dot_IMU += acc_x_world * dt;
-      y_dot_IMU += acc_y_world * dt;
+      x_dot_IMU += acc_x_world * dt_enc;
+      y_dot_IMU += acc_y_world * dt_enc;
 
       // 3. Seconda integrazione: Velocità -> Posizione
-      pose_data_imu.x += x_dot_IMU * dt;
-      pose_data_imu.y += y_dot_IMU * dt;
+      pose_data_imu.x += x_dot_IMU * dt_enc;
+      pose_data_imu.y += y_dot_IMU * dt_enc;
       pose_data_imu.theta = yaw_imu;
       pose_data_imu.timecode = imu_data.timecode;
     }
@@ -565,6 +633,29 @@ public:
     }
     return return_type::success;
   }
+
+  void compute_mse(double htc_x, double htc_y, double ekf_x, double ekf_y) {
+    // 1. Calcolo l'errore quadratico per questo istante
+    double err_x = htc_x - ekf_x;
+    double err_y = htc_y - ekf_y;
+    double sq_error = (err_x * err_x) + (err_y * err_y);
+
+    // 2. Accumulo
+    sum_sq_error += sq_error;
+    sample_count++;
+
+    // 3. Calcolo la media (MSE)
+    current_mse = sum_sq_error / sample_count;
+
+    // 4. Stampa (opzionale: potresti volerlo stampare ogni N cicli per non intasare il terminale)
+    if (sample_count % 100 == 0) {
+        std::cout << "[MSE] Current Mean Square Error: " << current_mse << " m^2" << std::endl;
+        // Se vuoi la distanza media in metri, stampa la radice quadrata (RMSE)
+        std::cout << "[RMSE] Root Mean Square Error: " << std::sqrt(current_mse) << " m" << std::endl;
+    }
+}
+
+
   void set_params(void const *params) override {
     Filter::set_params(params);
     _params.merge_patch(*(json *)params);
@@ -608,40 +699,50 @@ public:
   };
 
 private:
-  // offsets
-  double a_x_off_imu, a_y_off_imu, w_z_off_imu;
   // kinematic parameters
   double R_L; // raggio ruota sinistra [m]
   double R_R; // raggio ruota destra [m]
   int n0;     // tics per giro
   double b;   // distanza tra ruote [m]
 
-  // Data in input from sensors
+  // ENCODER
   EncoderData encoder_data;
-  HTCData htc_data;
-  RealsenseData realsense_data;
-  IMUData imu_data;
-
-  // smart pointer to EKF
-  std::unique_ptr<ExtendedKalmanFilter> ekf_ptr;
-
-  // Position computed by filter
   PoseData pose_data_enc;
-  PoseData pose_data_htc;
-  PoseData pose_data_realsense;
-  PoseData pose_data_imu;
-  PoseData pose_data_ekf;
-
-  // Variabili di stato interne plugin
+  double last_time_enc = 0.0;
   int last_enc_L = 0;
   int last_enc_R = 0;
-  double last_time = 0.0;
   bool ekf_first_init = true;
 
-  // Se non sono già presenti nei membri privati della classe:
+  // IMU
+  IMUData imu_data;
+  PoseData pose_data_imu;
+  double last_time_imu = 0.0;
   double x_dot_IMU = 0.0;
   double y_dot_IMU = 0.0;
-  // pose_data_imu è già dichiarata tra i tuoi membri privati
+  double a_x_off_imu, a_y_off_imu, w_z_off_imu;
+  // Velocità lineari nel World Frame (per l'integrazione)
+  float x_dot_MO = 0.0f, y_dot_MO = 0.0f; 
+  float prev_w_z = 0.0f;
+  double last_accel_time = 0.0;
+
+  // REALSENSE
+  RealsenseData realsense_data;
+  PoseData pose_data_realsense;
+  double last_time_rs = 0.0;
+
+  // HTC
+  HTCData htc_data;
+  PoseData pose_data_htc;
+
+  // EKF
+  std::unique_ptr<ExtendedKalmanFilter> ekf_ptr;
+  PoseData pose_data_ekf;
+
+
+  // MSE
+  double sum_sq_error = 0.0;
+  long sample_count = 0;
+  double current_mse = 0.0;
 };
 
 /*
