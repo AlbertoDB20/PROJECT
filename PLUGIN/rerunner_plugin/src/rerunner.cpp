@@ -258,7 +258,7 @@ public:
       return return_type::success;
   }
 
-  void set_params(void const *params) override {
+  void set_params(const json &params) override {
     // Call the parent class method to set the common parameters
     // (e.g. agent_id, etc.)
     Sink::set_params(params);
@@ -274,7 +274,7 @@ public:
     _params["parallelize"] = true;
 
     // then merge the defaults with the actually provided parameters
-    _params.merge_patch(*(json *)params);
+    _params.merge_patch(params);
     _window_size = _params.value("window_size", 200);
     _stats.reset(_window_size);
 
@@ -394,7 +394,7 @@ int main(int argc, char const *argv[]) {
   params["test"] = "value";
 
   // Set the parameters
-  plugin.set_params(&params);
+  plugin.set_params(params);
 
   // Process data
   plugin.load_data(input);

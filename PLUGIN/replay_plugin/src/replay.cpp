@@ -118,14 +118,14 @@ public:
     return return_type::success;
   }
 
-  void set_params(void const *params) override {
+  void set_params(const json &params) override {
     // Call the parent class method to set the common parameters 
     // (e.g. agent_id, etc.)
     Source::set_params(params);
 
     // provide sensible defaults for the parameters by setting e.g.
     _params["loop"] = false;
-    _params.merge_patch(*(json *)params);
+    _params.merge_patch(params);
 
     _replay = make_unique<Replay>(_params["csv_file"]);
     _replay->set_loop(_params["loop"]);
@@ -192,7 +192,7 @@ int main(int argc, char const *argv[]) {
   params["loop"] = false;
 
   // Set the parameters
-  plugin.set_params(&params);
+  plugin.set_params(params);
 
   // Process data
   while (plugin.get_output(output) != return_type::critical) {
