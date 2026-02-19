@@ -114,13 +114,10 @@ public:
   ExtendedKalmanFilter(double R_L, double R_R, double wheel_base,
                        int ticks_per_rev)
       : R_L_(R_L), R_R_(R_R), b_(wheel_base), n0_(ticks_per_rev) {
-    // Inizializzazione matrici dimensione fissa
     Q_.setZero();
     R_rs_.setZero();
     R_imu_.setZero();
-    // Valori di default (verranno sovrascritti da set_tuning)
-    init_matrices_default();
-
+    init_matrices_default();    // Default value, can be tuned later with set_tuning()
     initialized_ = false;
   }
 
@@ -129,9 +126,8 @@ public:
     x_(1) = y0;
     x_(2) = theta0;
     t_last_ = t0;
-    // --- FIX IMPORTANTE: Reset della Covarianza ---
-    P_.setIdentity();
-    P_ *= 0.1; // Partiamo con incertezza bassa ma non nulla
+    P_.setIdentity();     // Reset of Covariance
+    P_ *= 0.1;            // Start with some uncertainty
     reset_imu_integration(x0, y0);
     initialized_ = true;
   }
@@ -153,35 +149,34 @@ public:
     R_rs_(2, 2) = r_rs_yaw;
   }
 
+
   void predict(double t_now, int nL, int nR, double dt) {
     if (!initialized_) return;
 
-    // 1. Cinematica
+    // 0. Encoder kinematics
     double d_left = (2.0 * M_PI * R_L_ * nL) / n0_;
     double d_right = (2.0 * M_PI * R_R_ * nR) / n0_;
     double ds = (d_right + d_left) / 2.0;
     double dtheta = (d_right - d_left) / b_;
-    // Se ds e dtheta sono 0 (robot fermo), P cresce comunque per via di Q
-    // (drift) Ma va bene così.
-
     double theta = x_(2);
     double avg_theta = theta + dtheta / 2.0;
-    // 2. State Update
+    
+    // 1. State Update
     x_(0) = x_(0) + ds * std::cos(avg_theta);
     x_(1) = x_(1) + ds * std::sin(avg_theta);
     x_(2) = x_(2) + dtheta;
-    x_(2) = std::atan2(std::sin(x_(2)), std::cos(x_(2))); // Normalizza
+    x_(2) = std::atan2(std::sin(x_(2)), std::cos(x_(2)));   // Normalization angle between -PI and PI
 
     // 3. Covariance Update
-    // Jacobian F rispetto a [x, y, theta]
-    Eigen::Matrix3d F = Eigen::Matrix3d::Identity();
+    Eigen::Matrix3d F = Eigen::Matrix3d::Identity();  // Jacobian F of the motion model
     F(0, 2) = -ds * std::sin(avg_theta);
     F(1, 2) = ds * std::cos(avg_theta);
 
-    P_ = F * P_ * F.transpose() + Q_;
+    P_ = F * P_ * F.transpose() + Q_;     // P encrease even if ds and dtheta are 0, due to process noise Q
 
     t_last_ = t_now;
   }
+
 
   void update_realsense(double rs_x, double rs_y, double rs_theta) {
     if (!initialized_)
@@ -192,137 +187,109 @@ public:
 
     Eigen::Matrix3d H = Eigen::Matrix3d::Identity();
     Eigen::Vector3d y = z - x_;
-    y(2) =
-        std::atan2(std::sin(y(2)), std::cos(y(2))); // Shortest angular distance
+    y(2) = std::atan2(std::sin(y(2)), std::cos(y(2)));  // Shortest angular distance
 
     Eigen::Matrix3d S = H * P_ * H.transpose() + R_rs_;
-    Eigen::Matrix3d K = P_ * H.transpose() * S.inverse();
-
-    // --- DEBUG PRINT: SCOMMENTA PER CAPIRE CHI COMANDA ---
-    // Se K(0,0) è > 0.5, l'EKF si fida più della Realsense
-    // Se K(0,0) è < 0.1, l'EKF si fida più degli Encoder
-    //std::cout << "EKF Gain K_pos: " << K(0, 0) << " | P_pos: " << P_(0, 0) << std::endl;
+    Eigen::Matrix3d K = P_ * H.transpose() * S.inverse();  // Kalman Gain (3x3 matrix)  
 
     x_ = x_ + K * y;
     P_ = (Eigen::Matrix3d::Identity() - K * H) * P_;
     x_(2) = std::atan2(std::sin(x_(2)), std::cos(x_(2)));
   }
 
+
+
   void update_imu(double imu_gyro_z, double dt_imu) {
     if (!initialized_) return;
     
-
-    // --- FIX LOGICA IMU ---
-    // Niente offset strani. Assumiamo che imu_yaw sia nello stesso frame
-    // ENU/NED Se l'IMU è ruotata, gestiscilo nel "load_data", non qui dentro.
-    double z = imu_gyro_z * dt_imu;     // Integrazione angolare
+    double z = imu_gyro_z * dt_imu;     // I compute the angle change from the gyro readings
     Eigen::RowVector3d H;
-    H << 0, 0, 1; // Misuriamo solo Theta
+    H << 0, 0, 1;      
 
-    // Calcolo residuo angolare corretto
     double y_res = z - x_(2);
-    y_res = std::atan2(std::sin(y_res), std::cos(y_res)); // Normalizza tra -PI e PI
+    y_res = std::atan2(std::sin(y_res), std::cos(y_res));   // Normalize the angle residual to [-PI, PI]
 
     double S = (H * P_ * H.transpose())(0, 0) + R_imu_(0, 0);
-    // K è un vettore 3x1 (guadagno su x, y, theta dato l'errore di angolo)
-    Eigen::Vector3d K = P_ * H.transpose() / S;
+    Eigen::Vector3d K = P_ * H.transpose() / S;       // Kalman Gain (3x1 vector)
 
     x_ = x_ + K * y_res;
     P_ = (Eigen::Matrix3d::Identity() - K * H) * P_;
     x_(2) = std::atan2(std::sin(x_(2)), std::cos(x_(2)));
   }
 
+
+  
   double update_compass(double mx, double my, double mz) {
-    // --- 1. CALIBRAZIONE (Valori ottenuti dallo script MATLAB) ---
-    // Inserisci qui i risultati del calcolo Hard-Iron
-    const double offset_x = -4.9091; // Esempio: valore medio x
-    const double offset_y = -4.9091;  // Esempio: valore medio y
-    const double scale_x  = 0.5862;    // Opzionale: correzione ellitticità
+    // 1. Calibration (Hard-Iron Correction)
+    const double offset_x = -4.9091; 
+    const double offset_y = -4.9091; 
+    const double scale_x  = 0.5862;
     const double scale_y  = 3.3986;
 
     double mx_corr = (mx - offset_x) * scale_x;
     double my_corr = (my - offset_y) * scale_y;
 
-    // --- 2. CALCOLO HEADING (Angolo Magnetico) ---
-    // Usiamo -my perché, come da tuo datasheet, l'asse Z/rotazione è invertito
+    // 2. Heading computation (Assuming the robot moves on a flat plane, so we ignore mz for yaw estimation)
     double compass_yaw = std::atan2(-my_corr, mx_corr);
 
-    // --- 3. ALLINEAMENTO INIZIALE (Relativo allo "0" del Walker) ---
-    // La bussola punta al Nord, ma il tuo robot all'avvio punta verso lo "0" degli encoder.
+    // 3. Initial Alignment (Relative to the "0" of the Walker)
     if (!compass_initialized) {
         compass_offset = compass_yaw; 
         compass_initialized = true;
-        //std::cout << "Compass aligned to robot zero. Offset: " << compass_offset << std::endl;
     }
 
-    // Calcolo l'angolo relativo alla posizione di partenza
     double yaw_measured = compass_yaw - compass_offset;
 
-    // Normalizzazione nell'intervallo [-PI, PI]
-    yaw_measured = std::atan2(std::sin(yaw_measured), std::cos(yaw_measured));
-
-    return yaw_measured;
+    return std::atan2(std::sin(yaw_measured), std::cos(yaw_measured));
   }
 
-  // Funzione generica per aggiornare SOLO la posizione X e Y (senza toccare Theta)
-  void update_position(double pos_x, double pos_y, double R_variance) {   // TODO: verificare R se usare quella gia nota, verificare la fusion roll e pitch se conviene calcolarli come per lo yaw
+
+
+  void update_position(double pos_x, double pos_y) { 
     if (!initialized_) return;
 
-    // 1. Vettore di misura z
     Eigen::Vector2d z;
     z << pos_x, pos_y;
 
-    // 2. Matrice di osservazione H (Estrae solo x e y dallo stato [x,y,theta])
     Eigen::Matrix<double, 2, 3> H;
     H << 1, 0, 0,
          0, 1, 0;
 
-    // 3. Matrice di covarianza del rumore di misura R
-    // Usiamo una varianza alta perché l'accelerometro integrato "deriva" molto
     Eigen::Matrix2d R;
+    double R_variance = R_imu_(0, 0);
     R << R_variance, 0,
          0, R_variance;
 
-    // 4. Calcolo Innovazione (y) e Gain (K)
-    Eigen::Vector2d y = z - H * x_; // Residuo
-    
-    // S = H*P*H' + R
+    Eigen::Vector2d y = z - H * x_; 
     Eigen::Matrix2d S = H * P_ * H.transpose() + R;
-    
-    // K = P*H'*S^-1
     Eigen::Matrix<double, 3, 2> K = P_ * H.transpose() * S.inverse();
 
-    // 5. Aggiornamento Stato
     x_ = x_ + K * y;
-
-    // 6. Aggiornamento Covarianza P
     P_ = (Eigen::Matrix3d::Identity() - K * H) * P_;
     
-    // Normalizzazione Theta (anche se non toccato direttamente, per sicurezza numerica)
     x_(2) = std::atan2(std::sin(x_(2)), std::cos(x_(2)));
   }
 
-  // Funzione principale che implementa la TUA logica di elaborazione IMU
+
+
   Eigen::Vector2d process_accel_data(double ax, double ay, double az, 
                         float gz, float fusion_roll, float fusion_pitch, double dt) {
     
     if (!initialized_ || dt <= 0.0) {
-        //cout << initialized_ << " | " << dt << endl;
-        //cout << "IMU data ignored: EKF not initialized or invalid dt." << endl;
         return Eigen::Vector2d(pos_imu_accum_x, pos_imu_accum_y);
     }
 
-    // --- 1. ROTAZIONE FRAME IMU -> FRAME ROVER ---
-    // Dal tuo snippet: x->y, y->x, z->z (sinistrorso?)
+    // 1. Rotate FRAME IMU -> FRAME ROVER
+    // x->y, y->x, z->z    (sinistrorso)
     Eigen::Matrix3d R_imu_to_rover;
     R_imu_to_rover << 0, 1, 0,
                       1, 0, 0,
                       0, 0, 1;
 
     Eigen::Vector3d a_raw_g(ax, ay, az);
-    Eigen::Vector3d a_PM = R_imu_to_rover * (a_raw_g * 9.81);   // Convertiamo in m/s^2 e ruotiamo
+    Eigen::Vector3d a_PM = R_imu_to_rover * (a_raw_g * 9.81);   // Convert from g to m/s^2 and rotate
 
-    // --- 2. ACCELERAZIONE ANGOLARE (w_dot) ---
+    // 2. Angular Acceleration (w_dot)
     double w_dot_z = 0.0;
     if (dt > 1e-6) {
         w_dot_z = (gz - prev_gyro_z_) / dt;
@@ -332,43 +299,39 @@ public:
     Eigen::Vector3d w(0.0, 0.0, gz);
     Eigen::Vector3d w_dot(0.0, 0.0, w_dot_z);
     
-    // --- 3. LEVER ARM COMPENSATION (IMU position relative to rover RF) ---
-    Eigen::Vector3d r_MP(0.70, -0.20, 0.0);   // IMU spostata di 70cm in X e -20cm in Y
+    // 3. Lever arm compensation (IMU position relative to rover RF)
+    Eigen::Vector3d r_MP(0.70, -0.20, 0.0);     // IMU shifted 70cm over X and -20cm over Y
     Eigen::Vector3d a_MO = a_PM - w_dot.cross(r_MP) - w.cross(w.cross(r_MP));     // a_rover = a_imu - w_dot x r - w x (w x r)
 
-    // --- 4. RIMOZIONE GRAVITÀ (Usando Roll e Pitch Fusionati) ---
+    // 4. Gravity Compensation
     Eigen::Vector3d g_rover;
     g_rover.x() = -9.81 * std::sin(fusion_pitch);
     g_rover.y() =  9.81 * std::sin(fusion_roll) * std::cos(fusion_pitch);
     g_rover.z() =  9.81 * std::cos(fusion_roll) * std::cos(fusion_pitch);
-    a_MO -= g_rover;        // Ora a_MO è l'accelerazione lineare pura nel Rover Frame
+    a_MO -= g_rover;        // Now, a_MO is a linear acceleration into Rover Frame
 
-    // --- 5. ROTAZIONE NEL WORLD FRAME (Usando lo Yaw attuale dell'EKF) ---
-    // Usiamo lo stato x_(2) dell'EKF perché è la stima migliore dell'orientamento
+    // 5. World Frame Rotation (By using Yaw of the EKF as best estimate of the heading, we rotate the acceleration into the world frame to integrate it for position estimation)
     double yaw = x_(2); 
     double c = std::cos(yaw);
     double s = std::sin(yaw);
 
-    // Rotazione 2D (assumiamo piano 2D per il world frame)
     double ax_world = c * a_MO.x() - s * a_MO.y();
     double ay_world = s * a_MO.x() + c * a_MO.y();
 
-    // --- 6. INTEGRAZIONE (Accel -> Vel -> Pos) ---
+    // 6. Integration (Accel -> Vel -> Pos)
     vel_imu_x += ax_world * dt;
     vel_imu_y += ay_world * dt;
 
     pos_imu_accum_x += vel_imu_x * dt;
     pos_imu_accum_y += vel_imu_y * dt;
 
-    //cout << "Pos IMU Accumulata: x = " << pos_imu_accum_x << ", y = " << pos_imu_accum_y << endl;
-
-    // --- 7. RETURN ---
     return Eigen::Vector2d(pos_imu_accum_x, pos_imu_accum_y);
   }
 
-  // Setter per inizializzare la posizione accumulata allo start
+
+
+  
   void reset_imu_integration(double x0, double y0) {
-    //cout << "IMU Integration reset: posizione iniziale impostata a (" << x0 << ", " << y0 << ")" << endl;
     pos_imu_accum_x = x0 ;
     pos_imu_accum_y = y0;
     vel_imu_x = 0.0;
@@ -380,7 +343,6 @@ public:
 private:
   void init_matrices_default() {
     P_.setIdentity();
-    // Default Tuning (sicurezza)
     Q_.setIdentity();
     Q_ *= 0.01;
     R_rs_.setIdentity();
@@ -400,7 +362,6 @@ private:
   bool compass_initialized = false;
   double compass_offset = 0.0;
   double prev_gyro_z_ = 0.0;
-  // Variabili per l'integrazione
   double vel_imu_x = 0.0;
   double vel_imu_y = 0.0;
   double pos_imu_accum_x = 0.0;
@@ -408,6 +369,12 @@ private:
   double filter_roll = 0.0;
   double filter_pitch = 0.0;
 };
+
+
+
+
+
+
 
 // _______________________________________________________________________________________________
 
@@ -422,6 +389,9 @@ public:
 
     // Store data from encoders
     if (topic == "encoders") {
+      rs_arrived = false;
+      imu_arrived = false;
+      enc_arrived = true;
       printf("Storing encoder data...\n");
       const auto &root = REAL_TIME ? input : input["message"];
       if (root.contains("encoders")) {
@@ -442,7 +412,10 @@ public:
     }
 
     // Store data from HTC (position is a vector with x,y,z)
-    if (topic == "htc") {
+    if (topic == "H_initial_walker_htc") {
+      rs_arrived = false;
+      imu_arrived = false;
+      enc_arrived = false;
       printf("Storing HTC data...\n");
       const auto &root = REAL_TIME ? input : input["message"];
       if (root.contains("pose") && root["pose"].contains("position")) {
@@ -467,6 +440,10 @@ public:
 
     // Store data from Realsense
     if (topic == "H_initial_walker_aruco") {
+      // Data is arrived, we can set the flag to true for the EKF update
+      rs_arrived = true;
+      imu_arrived = false;
+      enc_arrived = false;
       const auto &root = REAL_TIME ? input : input["message"];
       if (root.contains("pose") && root["pose"].contains("position")) {
         const auto &P = root["pose"]["position"];
@@ -494,6 +471,9 @@ public:
 
     // Store data from IMU
     if (topic == "imu") {
+      rs_arrived = false;
+      imu_arrived = true;
+      enc_arrived = false;
       const auto &root = REAL_TIME ? input : input["message"];
       if (root.contains("accel")) {
         const auto &A = root["accel"];
@@ -575,23 +555,8 @@ public:
       last_time_imu = imu_data.timecode;
       second = true;
       first = false;
-      //ekf_ptr->init(0.0, 0.0, 0.0, encoder_data.timecode); TODO: check if redundant
-      //cout << "EKF Initialized" << endl;
-      //cout << "DM0: imu_acc_x: " << imu_data.acc_x << " | imu_acc_y: " << imu_data.acc_y << " | imu_acc_z: " << imu_data.acc_z << endl;  
-      return return_type::success;
+      return return_type::retry;
     }
-    //if(first_imu) {
-    //  last_time_imu = imu_data.timecode;
-    //  // Inizializza la posizione accumulata dell'IMU allo stato attuale dell'EKF
-    //  //Eigen::Vector3d x_est = ekf_ptr->getState();
-    //  //ekf_ptr->reset_imu_integration(0, 0); // Se vuoi inizializzare alla stima attuale, usa x_est(0), x_est(1)
-    //  first_imu = false;
-    //  cout << "IMU Initialized. Starting position set to (0,0) in IMU frame." << endl;
-    //  return return_type::success;
-    //}
-
-    //cout << "DC: imu_acc_x: " << imu_data.acc_x << " | imu_acc_y: " << imu_data.acc_y << " | imu_acc_z: " << imu_data.acc_z << endl; 
-    //cout << "dt_imu: " << imu_data.timecode<< "-" << last_time_imu << "=" << (imu_data.timecode - last_time_imu) << endl;
 
     float dt_enc = encoder_data.timecode - last_time_enc;
     last_time_enc = encoder_data.timecode;
@@ -607,18 +572,27 @@ public:
     last_enc_L = encoder_data.left_encoder;
     last_enc_R = encoder_data.right_encoder;
 
-    ekf_ptr->predict(encoder_data.timecode, n_Lk, n_Rk, dt_enc);
-
-
-
-    // ___________________ 2. UPDATE CON REALSENSE E IMU DATA ___________________
-    if (USE_REALSENSE) {
-      ekf_ptr->update_realsense(realsense_data.x, realsense_data.y, realsense_data.theta);  // Corregge (X, Y, Theta)
+    if(enc_arrived && dt_enc > 0.00001) {
+      ekf_ptr->predict(encoder_data.timecode, n_Lk, n_Rk, dt_enc);
     }
 
-    if (dt_imu > 0 && dt_imu < 0.5) {
-      yaw_computed = ekf_ptr->update_compass(imu_data.compass_x, imu_data.compass_y, imu_data.compass_z);
-      imu_calculated_pos = ekf_ptr->process_accel_data(
+    // ___________________ 2. UPDATE CON REALSENSE E IMU DATA ___________________
+    if (USE_REALSENSE && rs_arrived) {
+      ekf_ptr->update_realsense(realsense_data.x, realsense_data.y, realsense_data.theta);  // Updates (X, Y, Theta)
+    }
+
+    if (imu_arrived && dt_imu > 0.00001){ //dt_imu > 0 && dt_imu < 0.5) {
+      if (USE_IMU_GYRO) {
+        ekf_ptr->update_imu(imu_data.gyro_z, dt_imu);   // Updates only Theta
+      }
+      
+      if(USE_IMU_COMPASS){
+        yaw_computed = ekf_ptr->update_compass(imu_data.compass_x, imu_data.compass_y, imu_data.compass_z);
+        ekf_ptr->update_imu(yaw_computed, dt_imu); // Updates only Theta
+      }
+
+      if(USE_IMU_ACCEL) {
+        imu_calculated_pos = ekf_ptr->process_accel_data(
             imu_data.acc_x,      // Accel Raw X
             imu_data.acc_y,      // Accel Raw Y
             imu_data.acc_z,      // Accel Raw Z
@@ -627,17 +601,7 @@ public:
             imu_data.fusion_pitch, // Pitch fusionato (per rimozione gravità)
             dt_imu
         );
-
-      if (USE_IMU_GYRO) {
-        ekf_ptr->update_imu(imu_data.gyro_z, dt_imu);   // Corregge solo Theta
-      }
-      
-      if(USE_IMU_COMPASS){
-        ekf_ptr->update_imu(yaw_computed, dt_imu); // Corregge solo Theta
-      }
-
-      if(USE_IMU_ACCEL) {
-        ekf_ptr->update_position(imu_calculated_pos.x(), imu_calculated_pos.y(), 200.0); // Corregge (X,Y)
+        ekf_ptr->update_position(imu_calculated_pos.x(), imu_calculated_pos.y()); // Updates (X,Y)
       }
     }
 
@@ -657,14 +621,13 @@ public:
     // 3.2. Realsense
     pose_data_realsense.x = realsense_data.x;
     pose_data_realsense.y = realsense_data.y;
-    pose_data_realsense.z = 0.0;                              // assuming z=0 for realsense
-    pose_data_realsense.timecode = encoder_data.timecode;     // realsense_data.timecode;     // TODO:check
+    pose_data_realsense.z = 0.0;                              
+    pose_data_realsense.timecode = encoder_data.timecode;    // TODO:check realsense_data.timecode
 
     // 3.3. IMU
     pose_data_imu.x = imu_calculated_pos.x() * 0.1;
     pose_data_imu.y = imu_calculated_pos.y() * 0.1;
-    pose_data_imu.z = 0.0;          // assuming z=0 for IMU
-    //cout << "td_imu: " << dt_imu << endl;
+    pose_data_imu.z = 0.0;         
 
     // 3.4. EKF
     Eigen::Vector3d x_est = ekf_ptr->getState();
@@ -725,24 +688,23 @@ public:
 
 
   void compute_mse(double htc_x, double htc_y, double ekf_x, double ekf_y) {
-    // 1. Calcolo l'errore quadratico per questo istante
+    // 1. Compute error
     double err_x = htc_x - ekf_x;
     double err_y = htc_y - ekf_y;
     double sq_error = (err_x * err_x) + (err_y * err_y);
 
-    // 2. Accumulo
+    // 2. Accumulate squared error and count samples
     sum_sq_error += sq_error;
     sample_count++;
 
-    // 3. Calcolo la media (MSE)
+    // 3. Compute MSE
     current_mse = sum_sq_error / sample_count;
 
-    // 4. Stampa (opzionale: potresti volerlo stampare ogni N cicli per non intasare il terminale)
-    if (sample_count % 100 == 0) {
+    // 4. Print MSE every 100 samples
+    /*if (sample_count % 100 == 0) {
         std::cout << "[MSE] Current Mean Square Error: " << current_mse << " m^2" << std::endl;
-        // Se vuoi la distanza media in metri, stampa la radice quadrata (RMSE)
         std::cout << "[RMSE] Root Mean Square Error: " << std::sqrt(current_mse) << " m" << std::endl;
-    }
+    }*/
   }
 
 
@@ -793,6 +755,10 @@ private:
   double R_R; // raggio ruota destra [m]
   int n0;     // tics per giro
   double b;   // distanza tra ruote [m]
+
+  bool rs_arrived = false;
+  bool imu_arrived = false;
+  bool enc_arrived = false;
 
   // ENCODER
   EncoderData encoder_data;
